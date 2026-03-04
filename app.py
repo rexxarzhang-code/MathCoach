@@ -72,7 +72,7 @@ def load_config():
                 'textbook': '人教版'
             },
             'analysis': {
-                'exercise_count': 3,
+                'enable_exercises': True,  # 默认开启延展练习
                 'difficulty_range': ['相同难度', '稍难', '综合应用']
             }
         }
@@ -1462,7 +1462,12 @@ with st.sidebar:
     
     st.divider()
     
-    exercise_count = st.slider("练习题数量", 1, 5, config['analysis']['exercise_count'])
+    # 延展练习开关（默认开启，固定1题）
+    enable_exercises = st.checkbox(
+        "💪 生成延展练习（推荐）", 
+        value=config['analysis'].get('enable_exercises', True),
+        help="AI会推荐1道相似练习题，巩固知识点。关闭可提升分析速度。"
+    )
     
     if st.button("💾 保存配置"):
         config['student']['location'] = location
@@ -1471,7 +1476,7 @@ with st.sidebar:
         config['student']['textbook'] = textbook
         config['student']['target_school'] = target_school
         config['student']['school_group'] = school_group
-        config['analysis']['exercise_count'] = exercise_count
+        config['analysis']['enable_exercises'] = enable_exercises
         
         with open('config.yaml', 'w', encoding='utf-8') as f:
             yaml.dump(config, f, allow_unicode=True)
@@ -1755,43 +1760,48 @@ if uploaded_files:
             error_placeholder.error(f"❌ 错因诊断失败: {str(e)[:200]}")
             st.session_state['error_diagnosis'] = f"诊断失败: {str(e)}"
         
-        # 3. 练习题生成 - 流式输出
-        status_placeholder.info("💪 正在生成延展练习...")
-        try:
-            response_stream = generate_similar_exercises(
-                all_images, 
-                st.session_state['knowledge_analysis'], 
-                exercise_count=exercise_count,  # 使用用户选择的题目数量
-                stream=True
-            )
-            
-            exercise_text = ""
-            with exercise_placeholder.container():
-                st.markdown("### 💪 延展练习")
-                text_area = st.empty()
+        # 3. 练习题生成 - 流式输出（可选，根据用户设置）
+        if enable_exercises:
+            status_placeholder.info("💪 正在生成延展练习...")
+            try:
+                response_stream = generate_similar_exercises(
+                    all_images, 
+                    st.session_state['knowledge_analysis'], 
+                    exercise_count=1,  # 固定生成1题，提升效率
+                    stream=True
+                )
                 
-                if selected_model == 'qwen' or selected_model == 'qwen-max':
-                    for chunk in stream_qwen_response(response_stream):
-                        exercise_text += chunk
-                        text_area.text(exercise_text)
-                else:  # gemini
-                    for chunk in stream_gemini_response(response_stream):
-                        exercise_text += chunk
-                        text_area.text(exercise_text)
+                exercise_text = ""
+                with exercise_placeholder.container():
+                    st.markdown("### 💪 延展练习")
+                    text_area = st.empty()
+                    
+                    if selected_model == 'qwen' or selected_model == 'qwen-max':
+                        for chunk in stream_qwen_response(response_stream):
+                            exercise_text += chunk
+                            text_area.text(exercise_text)
+                    else:  # gemini
+                        for chunk in stream_gemini_response(response_stream):
+                            exercise_text += chunk
+                            text_area.text(exercise_text)
+                    
+                    # 流式完成后,完整渲染markdown(包含LaTeX)
+                    text_area.markdown(exercise_text, unsafe_allow_html=True)
                 
-                # 流式完成后,完整渲染markdown(包含LaTeX)
-                text_area.markdown(exercise_text, unsafe_allow_html=True)
-            
-            st.session_state['exercises'] = exercise_text
-            status_placeholder.success("✅ 全部分析完成!")
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "timeout" in error_msg or "timed out" in error_msg:
-                exercise_placeholder.error("⚠️ **延展练习生成超时** - 内容较多需要较长时间，已增加超时限制。请刷新页面重试或在侧边栏减少练习题数量（如改为1-2题）")
-                st.session_state['exercises'] = "生成超时，请重试"
-            else:
-                exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:300]}")
-                st.session_state['exercises'] = f"生成失败: {str(e)}"
+                st.session_state['exercises'] = exercise_text
+                status_placeholder.success("✅ 全部分析完成!")
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "timeout" in error_msg or "timed out" in error_msg:
+                    exercise_placeholder.error("⚠️ **延展练习生成超时** - 内容较多需要较长时间，已增加超时限制。请刷新页面重试或在侧边栏关闭延展练习")
+                    st.session_state['exercises'] = "生成超时，请重试"
+                else:
+                    exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:300]}")
+                    st.session_state['exercises'] = f"生成失败: {str(e)}"
+        else:
+            # 用户关闭了延展练习
+            st.session_state['exercises'] = ""
+            status_placeholder.success("✅ 分析完成!（已跳过延展练习）")
         
         # 4. 保存分析记录到 COS（用于后续记忆功能）
         if cos_client and st.session_state.get('cos_image_key'):
@@ -1817,7 +1827,13 @@ if uploaded_files:
     if 'knowledge_analysis' in st.session_state:
         st.divider()
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📚 知识点分析", "🔍 错因诊断", "💪 延展练习", "📄 完整报告"])
+        # 根据是否生成延展练习决定标签页
+        has_exercises = st.session_state.get('exercises', '') != ""
+        
+        if has_exercises:
+            tab1, tab2, tab3, tab4 = st.tabs(["📚 知识点分析", "🔍 错因诊断", "💪 延展练习", "📄 完整报告"])
+        else:
+            tab1, tab2, tab4 = st.tabs(["📚 知识点分析", "🔍 错因诊断", "📄 完整报告"])
         
         with tab1:
             st.markdown(st.session_state['knowledge_analysis'], unsafe_allow_html=True)
@@ -1825,8 +1841,9 @@ if uploaded_files:
         with tab2:
             st.markdown(st.session_state['error_diagnosis'], unsafe_allow_html=True)
         
-        with tab3:
-            st.markdown(st.session_state['exercises'], unsafe_allow_html=True)
+        if has_exercises:
+            with tab3:
+                st.markdown(st.session_state['exercises'], unsafe_allow_html=True)
         
         with tab4:
             # 首先生成报告

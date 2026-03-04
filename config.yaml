@@ -3,7 +3,7 @@ analysis:
   - 相同难度
   - 稍难
   - 综合应用(不超纲)
-  exercise_count: 1
+  enable_exercises: true  # 延展练习开关（默认开启，固定生成1题）
   forbidden:
   - 圆
   - 相似三角形
