@@ -16,6 +16,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from qcloud_cos import CosConfig, CosS3Client
+import hashlib
+import json
 
 # 加载环境变量
 load_dotenv()
@@ -23,6 +26,26 @@ load_dotenv()
 # 配置API Keys
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 QWEN_API_KEY = os.getenv('QWEN_API_KEY')
+
+# 配置腾讯云 COS
+TENCENT_SECRET_ID = os.getenv('TENCENT_SECRET_ID')
+TENCENT_SECRET_KEY = os.getenv('TENCENT_SECRET_KEY')
+TENCENT_COS_REGION = os.getenv('TENCENT_COS_REGION')
+TENCENT_COS_BUCKET = os.getenv('TENCENT_COS_BUCKET')
+
+# 初始化 COS 客户端
+cos_client = None
+if all([TENCENT_SECRET_ID, TENCENT_SECRET_KEY, TENCENT_COS_REGION, TENCENT_COS_BUCKET]):
+    try:
+        cos_config = CosConfig(
+            Region=TENCENT_COS_REGION,
+            SecretId=TENCENT_SECRET_ID,
+            SecretKey=TENCENT_SECRET_KEY,
+            Scheme='https'
+        )
+        cos_client = CosS3Client(cos_config)
+    except Exception as e:
+        st.warning(f"COS 初始化失败: {str(e)}")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -273,11 +296,12 @@ def analyze_knowledge_points(images, stream=False):
         else:
             return f"❌ **分析失败**: {str(e)[:200]}"
 
-def diagnose_error(images, stream=False):
-    """诊断学生的错误原因（支持多图）
+def diagnose_error(images, knowledge_analysis="", stream=False):
+    """诊断学生的错误原因（支持多图，带历史记忆）
     
     Args:
         images: 单个PIL图片或图片列表（第1张=错题，后续=草稿）
+        knowledge_analysis: 知识点分析结果（用于提取关键词）
         stream: 是否流式输出
     """
     target_school = config['student'].get('target_school', '雅礼中学')
@@ -286,6 +310,15 @@ def diagnose_error(images, stream=False):
     # 确保images是列表
     if not isinstance(images, list):
         images = [images]
+    
+    # 提取当前题目的关键词
+    current_keywords = extract_keywords_from_text(knowledge_analysis)
+    
+    # 搜索历史相似错题
+    similar_errors = search_similar_errors(current_keywords, limit=3)
+    
+    # 生成记忆提示
+    memory_prompt = generate_memory_prompt(similar_errors, current_keywords)
     
     # 根据图片数量调整prompt
     if len(images) > 1:
@@ -314,6 +347,8 @@ def diagnose_error(images, stream=False):
 - 目标: 考上{config['student']['location']}{school_group},目标高中是**{target_school}**
 - 当前年级: {config['student']['grade']}
 
+{memory_prompt}
+
 请分析:
 1. **学生解题思路**: 学生是怎么思考这道题的?
 2. **出错步骤**: 在哪一步出现了错误?{' (请结合草稿纸的内容具体指出)' if len(images) > 1 else ''}
@@ -324,12 +359,16 @@ def diagnose_error(images, stream=False):
    - 方法选择不当
    - 其他
 4. **错误原因**: 为什么会犯这个错误?可能的思维漏洞是什么?
-5. **改进建议**: 
+5. **重复错误检查**: {'⚠️ 根据历史记录，这个知识点不是第一次出错！请特别说明：' if similar_errors else ''}
+   {'- 与之前错误的相似之处' if similar_errors else ''}
+   {'- 是否存在根本性的理解问题' if similar_errors else ''}
+   {'- 为什么会重复犯错' if similar_errors else ''}
+6. **改进建议**: 
    - 具体应该如何改进?需要加强哪方面的练习?
    - **针对目标{target_school}**: 此类错误如果不改正,对考入{target_school}的影响程度(严重/中等/轻微)
-   - 建议的训练重点和强度
+   - {'**针对重复错误的强化方案**（务必给出具体、可执行的训练计划）' if similar_errors else '建议的训练重点和强度'}
 
-6. **激励与目标**:
+7. **激励与目标**:
    - 以目标{target_school}为动力,给予鼓励和具体的提升路径
 
 请用鼓励和建设性的语气,帮助学生理解错误并改进。使用markdown格式输出。
@@ -503,6 +542,469 @@ def generate_similar_exercises(images, knowledge_analysis, exercise_count=None, 
             return "⚠️ **API配额已用完** - 请稍后重试或升级计划"
         else:
             return f"❌ **生成失败**: {str(e)[:200]}"
+
+def upload_to_cos(file_data, file_name, file_type='image'):
+    """
+    上传文件到腾讯云 COS
+    
+    Args:
+        file_data: 文件数据（bytes 或 BytesIO）
+        file_name: 文件名
+        file_type: 文件类型（image/report）
+    
+    Returns:
+        dict: {'success': bool, 'url': str, 'key': str, 'error': str}
+    """
+    if not cos_client:
+        return {'success': False, 'error': 'COS 未配置'}
+    
+    try:
+        # 生成唯一文件名（使用时间戳+hash避免重复）
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        file_hash = hashlib.md5(file_data if isinstance(file_data, bytes) else file_data.getvalue()).hexdigest()[:8]
+        
+        # 根据类型确定存储路径
+        if file_type == 'image':
+            year = datetime.now().strftime('%Y')
+            month = datetime.now().strftime('%m')
+            cos_key = f"images/{year}/{month}/{timestamp}_{file_hash}_{file_name}"
+        else:  # report
+            year = datetime.now().strftime('%Y')
+            month = datetime.now().strftime('%m')
+            cos_key = f"reports/{year}/{month}/{timestamp}_{file_hash}_{file_name}"
+        
+        # 上传文件
+        if isinstance(file_data, bytes):
+            response = cos_client.put_object(
+                Bucket=TENCENT_COS_BUCKET,
+                Body=file_data,
+                Key=cos_key,
+                EnableMD5=False
+            )
+        else:
+            response = cos_client.put_object(
+                Bucket=TENCENT_COS_BUCKET,
+                Body=file_data.getvalue(),
+                Key=cos_key,
+                EnableMD5=False
+            )
+        
+        # 生成访问URL（内部访问）
+        url = f"https://{TENCENT_COS_BUCKET}.cos.{TENCENT_COS_REGION}.myqcloud.com/{cos_key}"
+        
+        return {
+            'success': True,
+            'url': url,
+            'key': cos_key,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'url': None,
+            'key': None
+        }
+
+def list_history_from_cos(limit=20):
+    """
+    从 COS 获取历史记录
+    
+    Args:
+        limit: 返回的最大记录数
+    
+    Returns:
+        list: 历史记录列表 [{'key': str, 'name': str, 'time': str, 'size': int}]
+    """
+    if not cos_client:
+        return []
+    
+    try:
+        # 列出所有图片
+        response = cos_client.list_objects(
+            Bucket=TENCENT_COS_BUCKET,
+            Prefix='images/',
+            MaxKeys=limit
+        )
+        
+        if 'Contents' not in response:
+            return []
+        
+        # 解析结果
+        history = []
+        for item in response['Contents']:
+            history.append({
+                'key': item['Key'],
+                'name': os.path.basename(item['Key']),
+                'time': item['LastModified'],
+                'size': item['Size']
+            })
+        
+        # 按时间倒序排序
+        history.sort(key=lambda x: x['time'], reverse=True)
+        
+        return history
+    except Exception as e:
+        st.error(f"获取历史记录失败: {str(e)}")
+        return []
+
+def download_from_cos(cos_key):
+    """
+    从 COS 下载文件
+    
+    Args:
+        cos_key: COS 对象键
+    
+    Returns:
+        bytes: 文件数据
+    """
+    if not cos_client:
+        return None
+    
+    try:
+        response = cos_client.get_object(
+            Bucket=TENCENT_COS_BUCKET,
+            Key=cos_key
+        )
+        # 修复：使用 get_raw_stream().read() 读取完整内容
+        # 默认的 read() 只读取 1024 字节
+        return response['Body'].get_raw_stream().read()
+    except Exception as e:
+        st.error(f"下载失败: {str(e)}")
+        return None
+
+def format_friendly_time(time_str):
+    """
+    将 ISO 8601 时间格式转换为友好格式
+    
+    Args:
+        time_str: ISO 8601 格式的时间字符串（如：2026-03-04T08:33:48.000Z）
+    
+    Returns:
+        str: 友好格式的时间字符串（如：2026-03-04 16:33:48）
+    """
+    try:
+        # 解析 ISO 8601 格式
+        from datetime import datetime
+        
+        # 移除末尾的 .000Z 或 Z
+        if time_str.endswith('Z'):
+            time_str = time_str[:-1]
+        if '.' in time_str:
+            time_str = time_str.split('.')[0]
+        
+        # 解析时间
+        dt = datetime.fromisoformat(time_str)
+        
+        # 转换为本地时间（UTC+8）
+        from datetime import timedelta
+        dt = dt + timedelta(hours=8)
+        
+        # 格式化为友好格式
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        # 如果解析失败，返回原始字符串
+        return time_str
+
+def check_image_duplicate(image_data):
+    """
+    检查图片是否已经上传并分析过
+    
+    Args:
+        image_data: 图片数据（bytes）
+    
+    Returns:
+        dict: {
+            'is_duplicate': bool,  # 是否重复
+            'record': dict,        # 如果重复，返回之前的分析记录
+            'image_key': str,      # 图片的 COS 键
+            'upload_time': str     # 首次上传时间
+        }
+    """
+    if not cos_client:
+        return {'is_duplicate': False}
+    
+    try:
+        # 计算图片的 MD5 哈希
+        image_hash = hashlib.md5(image_data).hexdigest()
+        
+        # 搜索所有图片，查找相同哈希
+        marker = ""
+        while True:
+            response = cos_client.list_objects(
+                Bucket=TENCENT_COS_BUCKET,
+                Prefix='images/',
+                Marker=marker,
+                MaxKeys=1000
+            )
+            
+            if 'Contents' not in response:
+                break
+            
+            # 检查每个图片的哈希
+            for item in response['Contents']:
+                key = item['Key']
+                
+                # 跳过目录
+                if key.endswith('/'):
+                    continue
+                
+                # 从文件名中提取哈希（格式：YYYYMMDD_HHMMSS_hash_filename）
+                filename = os.path.basename(key)
+                key_parts = filename.split('_')
+                
+                if len(key_parts) >= 3:
+                    stored_hash = key_parts[2]
+                    
+                    # 如果哈希匹配，说明是同一张图片
+                    if stored_hash == image_hash[:8]:  # 使用前8位哈希
+                        # 找到重复图片，查找对应的分析记录
+                        upload_time = item['LastModified']
+                        
+                        # 提取原始文件名（去掉时间戳和哈希）
+                        # 格式：YYYYMMDD_HHMMSS_hash_原始文件名.jpg
+                        # 原始文件名从第3个下划线后开始
+                        original_filename = '_'.join(key_parts[3:])
+                        
+                        # 搜索 records 目录，查找包含原始文件名的 JSON
+                        record_response = cos_client.list_objects(
+                            Bucket=TENCENT_COS_BUCKET,
+                            Prefix='records/',
+                            MaxKeys=1000
+                        )
+                        
+                        if 'Contents' in record_response:
+                            for record_item in record_response['Contents']:
+                                record_key = record_item['Key']
+                                
+                                # 检查记录是否对应这张图片
+                                # JSON文件名格式：YYYYMMDD_HHMMSS_原始文件名.json
+                                if original_filename in record_key and record_key.endswith('.json'):
+                                    # 下载并解析记录
+                                    try:
+                                        record_data = cos_client.get_object(
+                                            Bucket=TENCENT_COS_BUCKET,
+                                            Key=record_key
+                                        )
+                                        record_content = record_data['Body'].get_raw_stream().read().decode('utf-8')
+                                        record = json.loads(record_content)
+                                        
+                                        return {
+                                            'is_duplicate': True,
+                                            'record': record,
+                                            'image_key': key,
+                                            'upload_time': upload_time
+                                        }
+                                    except Exception as e:
+                                        # 记录解析失败，继续搜索
+                                        continue
+            
+            # 检查是否还有更多对象
+            if response['IsTruncated'] == 'false':
+                break
+            marker = response['NextMarker']
+        
+        # 没有找到重复
+        return {'is_duplicate': False}
+    
+    except Exception as e:
+        st.warning(f"去重检查失败: {str(e)}")
+        return {'is_duplicate': False}
+
+def save_analysis_record(image_key, image_name, knowledge_analysis, error_diagnosis, exercises):
+    """
+    保存错题分析记录到 COS（JSON格式）
+    
+    Args:
+        image_key: 图片的COS键
+        image_name: 图片名称
+        knowledge_analysis: 知识点分析结果
+        error_diagnosis: 错因诊断结果
+        exercises: 练习题
+    
+    Returns:
+        dict: {'success': bool, 'record_key': str, 'error': str}
+    """
+    if not cos_client:
+        return {'success': False, 'error': 'COS 未配置'}
+    
+    try:
+        # 提取关键信息（用于后续检索）
+        # 简单提取知识点关键词
+        knowledge_keywords = extract_keywords_from_text(knowledge_analysis)
+        
+        # 构建记录
+        record = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'image_key': image_key,
+            'image_name': image_name,
+            'student_info': {
+                'grade': config['student']['grade'],
+                'location': config['student']['location'],
+                'textbook': config['student']['textbook'],
+                'semester': config['student'].get('semester', '未设置')
+            },
+            'analysis': {
+                'knowledge_points': knowledge_analysis,
+                'error_diagnosis': error_diagnosis,
+                'exercises': exercises,
+                'keywords': knowledge_keywords  # 用于快速检索
+            }
+        }
+        
+        # 保存到 COS
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        record_key = f"records/{datetime.now().strftime('%Y/%m')}/{timestamp}_{image_name}.json"
+        
+        response = cos_client.put_object(
+            Bucket=TENCENT_COS_BUCKET,
+            Body=json.dumps(record, ensure_ascii=False, indent=2).encode('utf-8'),
+            Key=record_key,
+            EnableMD5=False
+        )
+        
+        return {
+            'success': True,
+            'record_key': record_key,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'record_key': None
+        }
+
+def extract_keywords_from_text(text):
+    """
+    从分析文本中提取关键知识点
+    
+    Args:
+        text: 分析文本
+    
+    Returns:
+        list: 关键词列表
+    """
+    # 常见数学知识点关键词库
+    math_keywords = [
+        '二次函数', '一次函数', '反比例函数', '函数', 
+        '勾股定理', '相似三角形', '全等三角形', '三角形',
+        '平行四边形', '矩形', '菱形', '正方形', '梯形',
+        '圆', '切线', '弦', '圆周角', '圆心角',
+        '因式分解', '配方法', '公式法', '十字相乘',
+        '方程', '方程组', '不等式', '不等式组',
+        '分式', '二次根式', '整式', '代数式',
+        '概率', '统计', '平均数', '中位数', '众数',
+        '旋转', '平移', '轴对称', '中心对称',
+        '角平分线', '中位线', '垂直平分线',
+        '计算', '证明', '应用题', '综合题'
+    ]
+    
+    # 在文本中查找关键词
+    found_keywords = []
+    text_lower = text.lower()
+    
+    for keyword in math_keywords:
+        if keyword in text:
+            found_keywords.append(keyword)
+    
+    return list(set(found_keywords))  # 去重
+
+def search_similar_errors(keywords, limit=5):
+    """
+    根据关键词搜索历史中的相似错题
+    
+    Args:
+        keywords: 关键词列表
+        limit: 返回的最大记录数
+    
+    Returns:
+        list: 相似错题记录列表
+    """
+    if not cos_client or not keywords:
+        return []
+    
+    try:
+        # 列出所有分析记录
+        response = cos_client.list_objects(
+            Bucket=TENCENT_COS_BUCKET,
+            Prefix='records/',
+            MaxKeys=500  # 最多检索最近500条（支持长期使用1-2年）
+        )
+        
+        if 'Contents' not in response:
+            return []
+        
+        similar_records = []
+        
+        # 遍历记录，计算相似度
+        for item in response['Contents']:
+            try:
+                # 下载记录（修复：使用 get_raw_stream().read() 读取完整内容）
+                record_data = cos_client.get_object(
+                    Bucket=TENCENT_COS_BUCKET,
+                    Key=item['Key']
+                )
+                record = json.loads(record_data['Body'].get_raw_stream().read().decode('utf-8'))
+                
+                # 计算关键词匹配度
+                record_keywords = record.get('analysis', {}).get('keywords', [])
+                match_count = len(set(keywords) & set(record_keywords))
+                
+                if match_count > 0:
+                    similar_records.append({
+                        'record': record,
+                        'match_score': match_count,
+                        'match_keywords': list(set(keywords) & set(record_keywords))
+                    })
+            except:
+                continue
+        
+        # 按匹配度排序
+        similar_records.sort(key=lambda x: x['match_score'], reverse=True)
+        
+        return similar_records[:limit]
+    
+    except Exception as e:
+        st.warning(f"搜索历史记录失败: {str(e)}")
+        return []
+
+def generate_memory_prompt(similar_errors, current_keywords):
+    """
+    基于历史错题生成记忆提示
+    
+    Args:
+        similar_errors: 相似错题列表
+        current_keywords: 当前题目的关键词
+    
+    Returns:
+        str: 记忆提示文本（用于添加到 AI prompt）
+    """
+    if not similar_errors:
+        return ""
+    
+    memory_text = "\n\n**⚠️ 重要提醒：历史错题记忆**\n\n"
+    memory_text += "根据错题档案，学生在以下知识点上曾经出现过错误：\n\n"
+    
+    for idx, item in enumerate(similar_errors, 1):
+        record = item['record']
+        match_keywords = item['match_keywords']
+        timestamp = record.get('timestamp', '未知时间')
+        error_diag = record.get('analysis', {}).get('error_diagnosis', '')
+        
+        # 提取错误类型（简短版本）
+        error_summary = error_diag[:200] + "..." if len(error_diag) > 200 else error_diag
+        
+        memory_text += f"{idx}. **{timestamp}** - 知识点：{', '.join(match_keywords)}\n"
+        memory_text += f"   错误类型：{error_summary}\n\n"
+    
+    memory_text += "**请在本次分析中**：\n"
+    memory_text += "1. 特别关注学生是否在相同知识点上重复犯错\n"
+    memory_text += "2. 如果是重复错误，请明确指出\"这不是第一次在XX知识点上出错\"\n"
+    memory_text += "3. 针对重复错误，给出更具体的改进建议和强化训练方案\n"
+    memory_text += "4. 如果错误类型相似，分析是否存在根本性的理解问题\n\n"
+    
+    return memory_text
 
 def create_report(image_name, knowledge_analysis, error_diagnosis, exercises):
     """生成完整报告"""
@@ -974,6 +1476,15 @@ with st.sidebar:
         st.rerun()
     
     st.divider()
+    
+    # COS 历史记录
+    if cos_client:
+        st.header("📚 错题历史")
+        if st.button("📖 查看历史记录", use_container_width=True):
+            st.session_state['show_history'] = True
+            st.rerun()
+    
+    st.divider()
     st.markdown("### 💡 使用说明")
     st.markdown("""
     1. 上传图片(最多4张)
@@ -1004,6 +1515,15 @@ uploaded_files = st.file_uploader(
     help="第1张必须是错题本身，后续图片(最多3张)可以是草稿纸"
 )
 
+# 检测文件是否变化，如果变化则重置去重检查状态
+if uploaded_files:
+    current_file_id = uploaded_files[0].file_id if hasattr(uploaded_files[0], 'file_id') else uploaded_files[0].name
+    if 'last_file_id' not in st.session_state or st.session_state['last_file_id'] != current_file_id:
+        # 文件已更换，重置去重检查状态
+        st.session_state['last_file_id'] = current_file_id
+        st.session_state.pop('duplicate_check_done', None)
+        st.session_state.pop('duplicate_check', None)
+
 if uploaded_files:
     # 限制最多4张图片
     if len(uploaded_files) > 4:
@@ -1017,6 +1537,94 @@ if uploaded_files:
     # 显示原图
     image = Image.open(uploaded_file)
     
+    # 🔍 去重检查：检查这张图片是否已经分析过
+    if cos_client and 'duplicate_check_done' not in st.session_state:
+        with st.spinner("🔍 正在检查是否为重复图片..."):
+            # 将图片转换为字节
+            img_byte_arr = BytesIO()
+            image.save(img_byte_arr, format=image.format or 'PNG')
+            img_byte_arr.seek(0)
+            image_bytes = img_byte_arr.getvalue()
+            
+            # 检查是否重复
+            duplicate_check = check_image_duplicate(image_bytes)
+            st.session_state['duplicate_check'] = duplicate_check
+            st.session_state['duplicate_check_done'] = True
+    
+    # 如果是重复图片，显示提示和历史记录
+    if st.session_state.get('duplicate_check', {}).get('is_duplicate', False):
+        dup_info = st.session_state['duplicate_check']
+        
+        # 格式化时间
+        friendly_time = format_friendly_time(dup_info['upload_time'])
+        
+        st.warning("⚠️ **检测到重复图片！**")
+        st.info(f"""
+        📋 这道错题已经在 **{friendly_time}** 分析过了！
+        
+        为了避免浪费 AI 配额和产生重复数据，我们为您展示之前的分析结果。
+        
+        💡 如果需要重新分析，请先删除之前的记录，或使用不同的图片。
+        """)
+        
+        # 显示之前的分析结果
+        st.divider()
+        st.subheader("📚 历史分析结果")
+        
+        record = dup_info['record']
+        
+        # 显示图片
+        st.markdown("### 📷 原题")
+        st.image(image, use_column_width=True)
+        
+        # 显示分析时间
+        if 'timestamp' in record:
+            st.caption(f"🕐 分析时间：{record['timestamp']}")
+        
+        st.divider()
+        
+        # 显示知识点分析
+        if 'analysis' in record and 'knowledge_points' in record['analysis']:
+            with st.expander("📚 知识点分析", expanded=True):
+                st.markdown(record['analysis']['knowledge_points'])
+        
+        # 显示错因诊断
+        if 'analysis' in record and 'error_diagnosis' in record['analysis']:
+            with st.expander("🔍 错因诊断", expanded=True):
+                st.markdown(record['analysis']['error_diagnosis'])
+        
+        # 显示延展练习
+        if 'analysis' in record and 'exercises' in record['analysis']:
+            with st.expander("💪 延展练习", expanded=True):
+                st.markdown(record['analysis']['exercises'])
+        
+        st.divider()
+        
+        # 提供下载按钮
+        st.markdown("### 📥 导出报告")
+        if st.button("📄 生成并下载 PDF 报告", use_container_width=True):
+            with st.spinner("📝 正在生成 PDF 报告..."):
+                # 使用历史记录生成PDF
+                pdf_buffer = generate_pdf(
+                    image,
+                    record['analysis']['knowledge_points'],
+                    record['analysis']['error_diagnosis'],
+                    record['analysis']['exercises']
+                )
+                
+                if pdf_buffer:
+                    st.download_button(
+                        label="💾 下载 PDF 报告",
+                        data=pdf_buffer,
+                        file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+        
+        # 阻止继续分析
+        st.stop()
+    
+    # 如果不是重复图片，继续正常流程
     # 如果有草稿图，调整布局显示
     if draft_files:
         st.subheader("📷 上传的图片")
@@ -1051,6 +1659,22 @@ if uploaded_files:
     # 分析逻辑（在按钮外，占据全宽）
     if analysis_clicked:
         st.session_state['analysis_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 上传错题图片到 COS
+        if cos_client:
+            with st.spinner("📤 正在保存错题到云端..."):
+                # 将图片转换为字节流
+                img_byte_arr = BytesIO()
+                image.save(img_byte_arr, format=image.format or 'PNG')
+                img_byte_arr.seek(0)
+                
+                # 上传到 COS
+                upload_result = upload_to_cos(img_byte_arr, uploaded_file.name, file_type='image')
+                if upload_result['success']:
+                    st.success("✅ 错题已保存到云端")
+                    st.session_state['cos_image_key'] = upload_result['key']
+                else:
+                    st.warning(f"⚠️ 云端保存失败: {upload_result['error']}")
         
         # 准备所有图片（错题+草稿）
         all_images = [image]
@@ -1098,10 +1722,11 @@ if uploaded_files:
             knowledge_placeholder.error(f"❌ 知识点分析失败: {str(e)[:200]}")
             st.session_state['knowledge_analysis'] = f"分析失败: {str(e)}"
         
-        # 2. 错因诊断 - 流式输出
-        status_placeholder.info("🔍 正在诊断错误原因...")
+        # 2. 错因诊断 - 流式输出（带历史记忆）
+        status_placeholder.info("🔍 正在诊断错误原因（检索历史记录...）")
         try:
-            response_stream = diagnose_error(all_images, stream=True)
+            # 传入知识点分析结果，用于搜索相似历史错题
+            response_stream = diagnose_error(all_images, knowledge_analysis=st.session_state['knowledge_analysis'], stream=True)
             
             error_text = ""
             with error_placeholder.container():
@@ -1158,6 +1783,24 @@ if uploaded_files:
         except Exception as e:
             exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:200]}")
             st.session_state['exercises'] = f"生成失败: {str(e)}"
+        
+        # 4. 保存分析记录到 COS（用于后续记忆功能）
+        if cos_client and st.session_state.get('cos_image_key'):
+            status_placeholder.info("💾 正在保存分析记录...")
+            try:
+                save_result = save_analysis_record(
+                    st.session_state['cos_image_key'],
+                    uploaded_file.name,
+                    st.session_state.get('knowledge_analysis', ''),
+                    st.session_state.get('error_diagnosis', ''),
+                    st.session_state.get('exercises', '')
+                )
+                if save_result['success']:
+                    status_placeholder.success("✅ 分析记录已保存！AI老师会记住这次错题！")
+                else:
+                    status_placeholder.warning(f"⚠️ 记录保存失败: {save_result['error']}")
+            except Exception as e:
+                status_placeholder.warning(f"⚠️ 记录保存失败: {str(e)}")
         
         st.rerun()
     
@@ -1227,7 +1870,52 @@ if uploaded_files:
             st.divider()
             st.markdown(report, unsafe_allow_html=True)
 
-else:
+# 历史记录页面
+if st.session_state.get('show_history', False):
+    st.header("📚 错题历史记录")
+    
+    if st.button("⬅️ 返回主页"):
+        st.session_state['show_history'] = False
+        st.rerun()
+    
+    st.divider()
+    
+    if not cos_client:
+        st.warning("⚠️ 未配置 COS 存储，无法查看历史记录")
+    else:
+        with st.spinner("📖 加载历史记录..."):
+            history = list_history_from_cos(limit=50)
+        
+        if not history:
+            st.info("📭 暂无历史记录")
+        else:
+            st.success(f"找到 {len(history)} 条历史记录")
+            
+            # 按时间分组显示
+            for idx, item in enumerate(history):
+                with st.expander(f"📝 {item['name']} - {item['time']}", expanded=(idx==0)):
+                    col1, col2 = st.columns([3, 1])
+                    
+                    with col1:
+                        # 下载并显示图片
+                        img_data = download_from_cos(item['key'])
+                        if img_data:
+                            img = Image.open(BytesIO(img_data))
+                            st.image(img, use_column_width=True)
+                    
+                    with col2:
+                        st.markdown(f"**上传时间**: {item['time']}")
+                        st.markdown(f"**文件大小**: {item['size'] / 1024:.2f} KB")
+                        
+                        if st.button("🔍 重新分析", key=f"reanalyze_{idx}"):
+                            # 加载图片到主界面重新分析
+                            st.session_state['reload_image'] = img_data
+                            st.session_state['show_history'] = False
+                            st.rerun()
+    
+    st.stop()
+
+elif not uploaded_files:
     st.info("👆 请上传一张错题图片开始分析")
     
     # 显示示例

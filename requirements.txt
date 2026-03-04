@@ -6,3 +6,4 @@ Pillow>=10.0.0
 PyYAML>=6.0.0
 reportlab>=4.0.0
 markdown>=3.5.0
+cos-python-sdk-v5>=1.9.0
