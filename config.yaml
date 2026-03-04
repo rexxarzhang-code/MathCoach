@@ -1,0 +1,33 @@
+analysis:
+  difficulty_range:
+  - 相同难度
+  - 稍难
+  - 综合应用(不超纲)
+  exercise_count: 1
+  forbidden:
+  - 圆
+  - 相似三角形
+  - 锐角三角函数
+  - 二次函数
+  - 向量
+  - 解析几何
+  syllabus:
+    八年级上学期:
+    - 三角形
+    - 全等三角形
+    - 轴对称
+    - 整式乘除
+    - 因式分解
+    八年级下学期:
+    - 分式
+    - 二次根式
+    - 勾股定理
+    - 平行四边形
+    - 一次函数
+student:
+  grade: 初中二年级
+  location: 长沙市
+  school_group: 四大五小
+  semester: 上学期
+  target_school: 雅礼中学
+  textbook: 人教版
