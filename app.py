@@ -80,18 +80,38 @@ def encode_image_base64(image):
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def call_qwen_vision(prompt, image, stream=False, model_id='qwen3.5-plus'):
-    """调用千问视觉模型"""
+def call_qwen_vision(prompt, images, stream=False, model_id='qwen3.5-plus'):
+    """调用千问视觉模型（支持多图）
+    
+    Args:
+        prompt: 提示词
+        images: 单个PIL图片或图片列表
+        stream: 是否流式输出
+        model_id: 模型ID
+    """
     try:
-        img_base64 = encode_image_base64(image)
+        # 确保images是列表
+        if not isinstance(images, list):
+            images = [images]
+        
+        # 限制最多4张图
+        if len(images) > 4:
+            raise Exception("千问模型最多支持4张图片")
+        
+        # 构建消息内容
+        content = [{'type': 'text', 'text': prompt}]
+        for img in images:
+            img_base64 = encode_image_base64(img)
+            content.append({
+                'type': 'image_url', 
+                'image_url': {'url': f'data:image/png;base64,{img_base64}'}
+            })
+        
         response = qwen_client.chat.completions.create(
             model=model_id,
             messages=[{
                 'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': prompt},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{img_base64}'}}
-                ]
+                'content': content
             }],
             temperature=0.7,
             stream=stream
@@ -103,11 +123,27 @@ def call_qwen_vision(prompt, image, stream=False, model_id='qwen3.5-plus'):
     except Exception as e:
         raise Exception(f"千问API调用失败: {str(e)}")
 
-def call_gemini_vision(prompt, image, stream=False):
-    """调用Gemini视觉模型"""
+def call_gemini_vision(prompt, images, stream=False):
+    """调用Gemini视觉模型（支持多图）
+    
+    Args:
+        prompt: 提示词
+        images: 单个PIL图片或图片列表
+        stream: 是否流式输出
+    """
     try:
+        # 确保images是列表
+        if not isinstance(images, list):
+            images = [images]
+        
+        # Gemini最多支持16张图
+        if len(images) > 16:
+            raise Exception("Gemini模型最多支持16张图片")
+        
         model = genai.GenerativeModel('gemini-flash-latest')
-        response = model.generate_content([prompt, image], stream=stream)
+        # Gemini的generate_content接受[prompt, img1, img2, ...]格式
+        content = [prompt] + images
+        response = model.generate_content(content, stream=stream)
         if stream:
             return response  # 返回流式生成器
         else:
@@ -115,14 +151,21 @@ def call_gemini_vision(prompt, image, stream=False):
     except Exception as e:
         raise Exception(f"Gemini API调用失败: {str(e)}")
 
-def call_vision_model(prompt, image, model_type='qwen', stream=False):
-    """统一的视觉模型调用接口"""
+def call_vision_model(prompt, images, model_type='qwen', stream=False):
+    """统一的视觉模型调用接口（支持多图）
+    
+    Args:
+        prompt: 提示词
+        images: 单个PIL图片或图片列表
+        model_type: 模型类型
+        stream: 是否流式输出
+    """
     if model_type in ['qwen', 'qwen-max'] and qwen_client:
         # 获取对应的model_id
         model_id = AVAILABLE_MODELS[model_type]['model_id']
-        return call_qwen_vision(prompt, image, stream=stream, model_id=model_id)
+        return call_qwen_vision(prompt, images, stream=stream, model_id=model_id)
     elif model_type == 'gemini' and GEMINI_API_KEY:
-        return call_gemini_vision(prompt, image, stream=stream)
+        return call_gemini_vision(prompt, images, stream=stream)
     else:
         raise Exception(f"模型 {model_type} 不可用,请检查API Key配置")
 
@@ -143,13 +186,36 @@ def get_model():
 
 model, current_model_name = get_model()
 
-def analyze_knowledge_points(image, stream=False):
-    """分析题目的知识点和考点"""
+def analyze_knowledge_points(images, stream=False):
+    """分析题目的知识点和考点（支持多图）
+    
+    Args:
+        images: 单个PIL图片或图片列表（第1张=错题，后续=草稿）
+        stream: 是否流式输出
+    """
     target_school = config['student'].get('target_school', '雅礼中学')
     school_group = config['student'].get('school_group', '四大五小')
     
+    # 确保images是列表
+    if not isinstance(images, list):
+        images = [images]
+    
+    # 根据图片数量调整prompt
+    if len(images) > 1:
+        image_desc = f"""
+**图片说明**:
+- 第1张图片: 错题本身
+- 第2-{len(images)}张图片: 学生的草稿纸/解题过程
+
+请综合分析错题和草稿内容。
+"""
+    else:
+        image_desc = "**图片说明**: 这是错题图片。"
+    
     prompt = f"""
 你是一位经验丰富的{config['student']['location']}数学老师,深度熟悉{config['student']['textbook']}{config['student']['grade']}教材。
+
+{image_desc}
 
 学生信息:
 - 地区: {config['student']['location']}
@@ -197,9 +263,9 @@ def analyze_knowledge_points(image, stream=False):
     try:
         selected_model = st.session_state.get('selected_model', 'qwen')
         if stream:
-            return call_vision_model(prompt, image, selected_model, stream=True)
+            return call_vision_model(prompt, images, selected_model, stream=True)
         else:
-            result = call_vision_model(prompt, image, selected_model)
+            result = call_vision_model(prompt, images, selected_model)
             return result
     except Exception as e:
         if "quota" in str(e).lower() or "429" in str(e):
@@ -207,13 +273,42 @@ def analyze_knowledge_points(image, stream=False):
         else:
             return f"❌ **分析失败**: {str(e)[:200]}"
 
-def diagnose_error(image, stream=False):
-    """诊断学生的错误原因"""
+def diagnose_error(images, stream=False):
+    """诊断学生的错误原因（支持多图）
+    
+    Args:
+        images: 单个PIL图片或图片列表（第1张=错题，后续=草稿）
+        stream: 是否流式输出
+    """
     target_school = config['student'].get('target_school', '雅礼中学')
     school_group = config['student'].get('school_group', '四大五小')
     
+    # 确保images是列表
+    if not isinstance(images, list):
+        images = [images]
+    
+    # 根据图片数量调整prompt
+    if len(images) > 1:
+        image_desc = f"""
+**重要提示**: 你收到了{len(images)}张图片:
+- 第1张: 错题本身（题目+学生答案）
+- 第2-{len(images)}张: 学生的草稿纸
+
+**请特别注意草稿纸内容**,这是诊断错误的关键:
+- 草稿上的计算步骤在哪一步出错?
+- 有没有划掉重来的痕迹（说明思路混乱）?
+- 是计算错误还是概念理解错误?
+- 草稿和最终答案是否一致?
+
+通过草稿纸,你可以看到学生的完整解题过程,而不仅仅是最终答案。
+"""
+    else:
+        image_desc = "**图片说明**: 这是错题图片,请根据图片内容分析学生的错误。"
+    
     prompt = f"""
 你是一位温和耐心的数学老师,请仔细观察这道题目和学生的答题过程(包括草稿痕迹)。
+
+{image_desc}
 
 学生背景:
 - 目标: 考上{config['student']['location']}{school_group},目标高中是**{target_school}**
@@ -221,7 +316,7 @@ def diagnose_error(image, stream=False):
 
 请分析:
 1. **学生解题思路**: 学生是怎么思考这道题的?
-2. **出错步骤**: 在哪一步出现了错误?
+2. **出错步骤**: 在哪一步出现了错误?{' (请结合草稿纸的内容具体指出)' if len(images) > 1 else ''}
 3. **错误类型**: 
    - 概念理解错误
    - 计算失误
@@ -242,9 +337,9 @@ def diagnose_error(image, stream=False):
     try:
         selected_model = st.session_state.get('selected_model', 'qwen')
         if stream:
-            return call_vision_model(prompt, image, selected_model, stream=True)
+            return call_vision_model(prompt, images, selected_model, stream=True)
         else:
-            result = call_vision_model(prompt, image, selected_model)
+            result = call_vision_model(prompt, images, selected_model)
             return result
     except Exception as e:
         if "quota" in str(e).lower() or "429" in str(e):
@@ -252,8 +347,19 @@ def diagnose_error(image, stream=False):
         else:
             return f"❌ **诊断失败**: {str(e)[:200]}"
 
-def generate_similar_exercises(image, knowledge_analysis, exercise_count=None, stream=False):
-    """生成相似的练习题 - 优先从真题库中检索"""
+def generate_similar_exercises(images, knowledge_analysis, exercise_count=None, stream=False):
+    """生成相似的练习题 - 优先从真题库中检索（支持多图）
+    
+    Args:
+        images: 单个PIL图片或图片列表（第1张=错题，后续=草稿）
+        knowledge_analysis: 知识点分析结果
+        exercise_count: 练习题数量
+        stream: 是否流式输出
+    """
+    # 确保images是列表
+    if not isinstance(images, list):
+        images = [images]
+    
     # 获取当前学期的教学大纲
     semester = config['student'].get('semester', '上学期')
     grade_key = f"八年级{semester}"
@@ -388,9 +494,9 @@ def generate_similar_exercises(image, knowledge_analysis, exercise_count=None, s
     try:
         selected_model = st.session_state.get('selected_model', 'qwen')
         if stream:
-            return call_vision_model(prompt, image, selected_model, stream=True)
+            return call_vision_model(prompt, images, selected_model, stream=True)
         else:
-            result = call_vision_model(prompt, image, selected_model)
+            result = call_vision_model(prompt, images, selected_model)
             return result
     except Exception as e:
         if "quota" in str(e).lower() or "429" in str(e):
@@ -870,10 +976,14 @@ with st.sidebar:
     st.divider()
     st.markdown("### 💡 使用说明")
     st.markdown("""
-    1. 上传错题图片(包含草稿)
+    1. 上传图片(最多4张)
+       - 第1张: 错题本身 ✅
+       - 第2-4张: 草稿纸(可选) 📝
     2. 点击"开始分析"按钮
     3. 查看知识点、错因、练习题
     4. 下载完整报告
+    
+    💡 **提示**: 上传草稿纸可以帮助AI更准确地定位出错步骤!
     """)
     
     st.divider()
@@ -887,120 +997,169 @@ with st.sidebar:
     """)
 
 # 主界面
-uploaded_file = st.file_uploader("📤 上传错题图片", type=['png', 'jpg', 'jpeg'])
+uploaded_files = st.file_uploader(
+    "📤 上传图片", 
+    type=['png', 'jpg', 'jpeg'],
+    accept_multiple_files=True,
+    help="第1张必须是错题本身，后续图片(最多3张)可以是草稿纸"
+)
 
-if uploaded_file is not None:
+if uploaded_files:
+    # 限制最多4张图片
+    if len(uploaded_files) > 4:
+        st.error("❌ 最多上传4张图片（1张错题+3张草稿）")
+        st.stop()
+    
+    # 第1张是错题，后续是草稿
+    uploaded_file = uploaded_files[0]
+    draft_files = uploaded_files[1:] if len(uploaded_files) > 1 else []
+    
     # 显示原图
     image = Image.open(uploaded_file)
-    col1, col2 = st.columns([1, 1])
     
-    with col1:
+    # 如果有草稿图，调整布局显示
+    if draft_files:
+        st.subheader("📷 上传的图片")
+        cols = st.columns(min(4, len(uploaded_files)))
+        
+        # 显示错题（第1张）
+        with cols[0]:
+            st.markdown("**错题**")
+            st.image(image, use_column_width=True)
+            st.caption(f"📄 {uploaded_file.name}")
+        
+        # 显示草稿（后续图片）
+        for idx, draft_file in enumerate(draft_files):
+            with cols[idx + 1]:
+                st.markdown(f"**草稿 {idx + 1}**")
+                draft_image = Image.open(draft_file)
+                st.image(draft_image, use_column_width=True)
+                st.caption(f"📝 {draft_file.name}")
+    else:
+        # 只有错题，居中显示
         st.subheader("📷 原题")
-        st.image(image, use_container_width=True)
+        st.image(image, use_column_width=True)
     
-    with col2:
-        st.subheader("🎯 快速操作")
-        if st.button("🚀 开始分析", type="primary", use_container_width=True):
-            st.session_state['analysis_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 快速操作按钮
+    st.divider()
+    st.subheader("🎯 快速操作")
+    
+    # 开始分析按钮（占据全宽）
+    analysis_clicked = st.button("🚀 开始分析", type="primary", use_container_width=True)
+    
+    # 分析逻辑（在按钮外，占据全宽）
+    if analysis_clicked:
+        st.session_state['analysis_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 准备所有图片（错题+草稿）
+        all_images = [image]
+        if draft_files:
+            for draft_file in draft_files:
+                all_images.append(Image.open(draft_file))
+        
+        # 显示分析提示
+        if len(all_images) > 1:
+            st.info(f"📊 正在分析 {len(all_images)} 张图片（1张错题 + {len(draft_files)}张草稿）...")
+        
+        # 创建占位符
+        status_placeholder = st.empty()
+        knowledge_placeholder = st.empty()
+        error_placeholder = st.empty()
+        exercise_placeholder = st.empty()
+        
+        # 1. 知识点分析 - 流式输出
+        status_placeholder.info("📚 正在分析知识点...")
+        try:
+            selected_model = st.session_state.get('selected_model', 'qwen')
+            response_stream = analyze_knowledge_points(all_images, stream=True)
             
-            # 创建占位符
-            status_placeholder = st.empty()
-            knowledge_placeholder = st.empty()
-            error_placeholder = st.empty()
-            exercise_placeholder = st.empty()
+            knowledge_text = ""
+            with knowledge_placeholder.container():
+                st.markdown("### 📚 知识点分析")
+                text_area = st.empty()
+                
+                if selected_model == 'qwen' or selected_model == 'qwen-max':
+                    for chunk in stream_qwen_response(response_stream):
+                        knowledge_text += chunk
+                        # 使用code显示避免LaTeX渲染问题,最后才完整渲染
+                        text_area.text(knowledge_text)
+                else:  # gemini
+                    for chunk in stream_gemini_response(response_stream):
+                        knowledge_text += chunk
+                        text_area.text(knowledge_text)
+                
+                # 流式完成后,完整渲染markdown(包含LaTeX)
+                text_area.markdown(knowledge_text, unsafe_allow_html=True)
             
-            # 1. 知识点分析 - 流式输出
-            status_placeholder.info("📚 正在分析知识点...")
-            try:
-                selected_model = st.session_state.get('selected_model', 'qwen')
-                response_stream = analyze_knowledge_points(image, stream=True)
-                
-                knowledge_text = ""
-                with knowledge_placeholder.container():
-                    st.markdown("### 📚 知识点分析")
-                    text_area = st.empty()
-                    
-                    if selected_model == 'qwen':
-                        for chunk in stream_qwen_response(response_stream):
-                            knowledge_text += chunk
-                            # 使用code显示避免LaTeX渲染问题,最后才完整渲染
-                            text_area.text(knowledge_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            knowledge_text += chunk
-                            text_area.text(knowledge_text)
-                    
-                    # 流式完成后,完整渲染markdown(包含LaTeX)
-                    text_area.markdown(knowledge_text, unsafe_allow_html=True)
-                
-                st.session_state['knowledge_analysis'] = knowledge_text
-                status_placeholder.success("✅ 知识点分析完成!")
-            except Exception as e:
-                knowledge_placeholder.error(f"❌ 知识点分析失败: {str(e)[:200]}")
-                st.session_state['knowledge_analysis'] = f"分析失败: {str(e)}"
+            st.session_state['knowledge_analysis'] = knowledge_text
+            status_placeholder.success("✅ 知识点分析完成!")
+        except Exception as e:
+            knowledge_placeholder.error(f"❌ 知识点分析失败: {str(e)[:200]}")
+            st.session_state['knowledge_analysis'] = f"分析失败: {str(e)}"
+        
+        # 2. 错因诊断 - 流式输出
+        status_placeholder.info("🔍 正在诊断错误原因...")
+        try:
+            response_stream = diagnose_error(all_images, stream=True)
             
-            # 2. 错因诊断 - 流式输出
-            status_placeholder.info("🔍 正在诊断错误原因...")
-            try:
-                response_stream = diagnose_error(image, stream=True)
+            error_text = ""
+            with error_placeholder.container():
+                st.markdown("### 🔍 错因诊断")
+                text_area = st.empty()
                 
-                error_text = ""
-                with error_placeholder.container():
-                    st.markdown("### 🔍 错因诊断")
-                    text_area = st.empty()
-                    
-                    if selected_model == 'qwen':
-                        for chunk in stream_qwen_response(response_stream):
-                            error_text += chunk
-                            text_area.text(error_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            error_text += chunk
-                            text_area.text(error_text)
-                    
-                    # 流式完成后,完整渲染markdown(包含LaTeX)
-                    text_area.markdown(error_text, unsafe_allow_html=True)
+                if selected_model == 'qwen' or selected_model == 'qwen-max':
+                    for chunk in stream_qwen_response(response_stream):
+                        error_text += chunk
+                        text_area.text(error_text)
+                else:  # gemini
+                    for chunk in stream_gemini_response(response_stream):
+                        error_text += chunk
+                        text_area.text(error_text)
                 
-                st.session_state['error_diagnosis'] = error_text
-                status_placeholder.success("✅ 错因诊断完成!")
-            except Exception as e:
-                error_placeholder.error(f"❌ 错因诊断失败: {str(e)[:200]}")
-                st.session_state['error_diagnosis'] = f"诊断失败: {str(e)}"
+                # 流式完成后,完整渲染markdown(包含LaTeX)
+                text_area.markdown(error_text, unsafe_allow_html=True)
             
-            # 3. 练习题生成 - 流式输出
-            status_placeholder.info("💪 正在生成延展练习...")
-            try:
-                response_stream = generate_similar_exercises(
-                    image, 
-                    st.session_state['knowledge_analysis'], 
-                    exercise_count=exercise_count,  # 使用用户选择的题目数量
-                    stream=True
-                )
-                
-                exercise_text = ""
-                with exercise_placeholder.container():
-                    st.markdown("### 💪 延展练习")
-                    text_area = st.empty()
-                    
-                    if selected_model == 'qwen':
-                        for chunk in stream_qwen_response(response_stream):
-                            exercise_text += chunk
-                            text_area.text(exercise_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            exercise_text += chunk
-                            text_area.text(exercise_text)
-                    
-                    # 流式完成后,完整渲染markdown(包含LaTeX)
-                    text_area.markdown(exercise_text, unsafe_allow_html=True)
-                
-                st.session_state['exercises'] = exercise_text
-                status_placeholder.success("✅ 全部分析完成!")
-            except Exception as e:
-                exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:200]}")
-                st.session_state['exercises'] = f"生成失败: {str(e)}"
+            st.session_state['error_diagnosis'] = error_text
+            status_placeholder.success("✅ 错因诊断完成!")
+        except Exception as e:
+            error_placeholder.error(f"❌ 错因诊断失败: {str(e)[:200]}")
+            st.session_state['error_diagnosis'] = f"诊断失败: {str(e)}"
+        
+        # 3. 练习题生成 - 流式输出
+        status_placeholder.info("💪 正在生成延展练习...")
+        try:
+            response_stream = generate_similar_exercises(
+                all_images, 
+                st.session_state['knowledge_analysis'], 
+                exercise_count=exercise_count,  # 使用用户选择的题目数量
+                stream=True
+            )
             
-            st.rerun()
+            exercise_text = ""
+            with exercise_placeholder.container():
+                st.markdown("### 💪 延展练习")
+                text_area = st.empty()
+                
+                if selected_model == 'qwen' or selected_model == 'qwen-max':
+                    for chunk in stream_qwen_response(response_stream):
+                        exercise_text += chunk
+                        text_area.text(exercise_text)
+                else:  # gemini
+                    for chunk in stream_gemini_response(response_stream):
+                        exercise_text += chunk
+                        text_area.text(exercise_text)
+                
+                # 流式完成后,完整渲染markdown(包含LaTeX)
+                text_area.markdown(exercise_text, unsafe_allow_html=True)
+            
+            st.session_state['exercises'] = exercise_text
+            status_placeholder.success("✅ 全部分析完成!")
+        except Exception as e:
+            exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:200]}")
+            st.session_state['exercises'] = f"生成失败: {str(e)}"
+        
+        st.rerun()
     
     # 显示分析结果
     if 'knowledge_analysis' in st.session_state:
