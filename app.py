@@ -53,7 +53,8 @@ if GEMINI_API_KEY:
 if QWEN_API_KEY:
     qwen_client = OpenAI(
         api_key=QWEN_API_KEY,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        timeout=300.0  # 设置超时时间为300秒（5分钟），避免延展练习生成时超时
     )
 else:
     qwen_client = None
@@ -538,8 +539,11 @@ def generate_similar_exercises(images, knowledge_analysis, exercise_count=None, 
             result = call_vision_model(prompt, images, selected_model)
             return result
     except Exception as e:
-        if "quota" in str(e).lower() or "429" in str(e):
+        error_msg = str(e).lower()
+        if "quota" in error_msg or "429" in error_msg:
             return "⚠️ **API配额已用完** - 请稍后重试或升级计划"
+        elif "timeout" in error_msg or "timed out" in error_msg:
+            return "⚠️ **生成超时** - 延展练习内容较多，请稍后重试或减少练习题数量"
         else:
             return f"❌ **生成失败**: {str(e)[:200]}"
 
@@ -1781,8 +1785,13 @@ if uploaded_files:
             st.session_state['exercises'] = exercise_text
             status_placeholder.success("✅ 全部分析完成!")
         except Exception as e:
-            exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:200]}")
-            st.session_state['exercises'] = f"生成失败: {str(e)}"
+            error_msg = str(e).lower()
+            if "timeout" in error_msg or "timed out" in error_msg:
+                exercise_placeholder.error("⚠️ **延展练习生成超时** - 内容较多需要较长时间，已增加超时限制。请刷新页面重试或在侧边栏减少练习题数量（如改为1-2题）")
+                st.session_state['exercises'] = "生成超时，请重试"
+            else:
+                exercise_placeholder.error(f"❌ 练习题生成失败: {str(e)[:300]}")
+                st.session_state['exercises'] = f"生成失败: {str(e)}"
         
         # 4. 保存分析记录到 COS（用于后续记忆功能）
         if cos_client and st.session_state.get('cos_image_key'):
