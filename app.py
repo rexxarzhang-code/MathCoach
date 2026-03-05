@@ -637,11 +637,17 @@ def list_history_from_cos(limit=20):
         # 解析结果
         history = []
         for item in response['Contents']:
+            # 确保 size 是整数类型
+            try:
+                size = int(item['Size']) if isinstance(item['Size'], str) else item['Size']
+            except (ValueError, TypeError):
+                size = 0  # 如果转换失败，默认为0
+            
             history.append({
                 'key': item['Key'],
                 'name': os.path.basename(item['Key']),
                 'time': item['LastModified'],
-                'size': item['Size']
+                'size': size
             })
         
         # 按时间倒序排序
@@ -1943,7 +1949,12 @@ if st.session_state.get('show_history', False):
                     
                     with col2:
                         st.markdown(f"**上传时间**: {item['time']}")
-                        st.markdown(f"**文件大小**: {item['size'] / 1024:.2f} KB")
+                        # 安全地显示文件大小，确保是数字类型
+                        try:
+                            size_kb = float(item['size']) / 1024
+                            st.markdown(f"**文件大小**: {size_kb:.2f} KB")
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            st.markdown(f"**文件大小**: 未知")
                         
                         if st.button("🔍 重新分析", key=f"reanalyze_{idx}"):
                             # 加载图片到主界面重新分析
