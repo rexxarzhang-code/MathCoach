@@ -1406,14 +1406,7 @@ school_group = config['student'].get('school_group', '四大五小')
 st.markdown(f"**当前配置**: {config['student']['location']} | {config['student']['grade']}{semester_display} | {config['student']['textbook']}")
 st.markdown(f"🎯 **学习目标**: 考上长沙{school_group}，目标高中 **{target_school}**")
 
-# 显示当前模型
-if st.session_state.get('selected_model'):
-    model_info = AVAILABLE_MODELS[st.session_state['selected_model']]
-    st.info(f"🤖 当前模型: **{model_info['name']}** (`{model_info['model_id']}`)")
-else:
-    st.error("❌ 未配置任何API Key,请在 .env 文件中配置 QWEN_API_KEY 或 GEMINI_API_KEY")
-
-# 侧边栏配置
+# 侧边栏配置（先处理侧边栏，确保 selected_model 是最新的）
 with st.sidebar:
     st.header("🤖 模型选择")
     
@@ -1424,12 +1417,20 @@ with st.sidebar:
             available_model_options.append((key, info['name']))
     
     if available_model_options:
+        # 计算当前选择的索引
+        current_model = st.session_state.get('selected_model')
+        default_index = 0
+        for idx, (key, _) in enumerate(available_model_options):
+            if key == current_model:
+                default_index = idx
+                break
+        
         selected = st.radio(
             "选择AI模型",
             options=[k for k, _ in available_model_options],
             format_func=lambda k: AVAILABLE_MODELS[k]['name'],
-            index=0 if st.session_state.get('selected_model') == available_model_options[0][0] else 
-                  (1 if len(available_model_options) > 1 and st.session_state.get('selected_model') == available_model_options[1][0] else 0)
+            index=default_index,
+            key='model_selector'  # 添加唯一的 key
         )
         st.session_state['selected_model'] = selected
         
@@ -1437,6 +1438,17 @@ with st.sidebar:
         st.caption(f"模型ID: `{AVAILABLE_MODELS[selected]['model_id']}`")
     else:
         st.error("❌ 没有可用的模型,请配置API Key")
+        selected = None
+
+# 显示当前模型（在侧边栏处理后显示，确保是最新值）
+if st.session_state.get('selected_model'):
+    model_info = AVAILABLE_MODELS[st.session_state['selected_model']]
+    st.info(f"🤖 当前模型: **{model_info['name']}** (`{model_info['model_id']}`)")
+else:
+    st.error("❌ 未配置任何API Key,请在 .env 文件中配置 QWEN_API_KEY 或 GEMINI_API_KEY")
+
+# 继续侧边栏其他配置
+with st.sidebar:
     
     st.divider()
     st.header("⚙️ 配置")
