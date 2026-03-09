@@ -1822,24 +1822,63 @@ if uploaded_files:
         
         # 提供下载按钮
         st.markdown("### 📥 导出报告")
-        if st.button("📄 生成并下载 PDF 报告", use_container_width=True):
-            with st.spinner("📝 正在生成 PDF 报告..."):
-                # 使用历史记录生成PDF
-                pdf_buffer = generate_pdf(
-                    image,
-                    record['analysis']['knowledge_points'],
-                    record['analysis']['error_diagnosis'],
-                    record['analysis']['exercises']
-                )
-                
-                if pdf_buffer:
-                    st.download_button(
-                        label="💾 下载 PDF 报告",
-                        data=pdf_buffer,
-                        file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # 生成Markdown报告
+            markdown_report = f"""# 📊 数学错题分析报告
+
+## 🕐 分析时间
+{record.get('timestamp', '未记录')}
+
+---
+
+## 📚 知识点分析
+{record['analysis'].get('knowledge_points', '暂无内容')}
+
+---
+
+## 🔍 错因诊断
+{record['analysis'].get('error_diagnosis', '暂无内容')}
+
+---
+
+## 💪 延展练习
+{record['analysis'].get('exercises', '暂无内容')}
+
+---
+
+*本报告由数学错题分析系统自动生成*
+"""
+            
+            st.download_button(
+                label="📥 下载Markdown报告",
+                data=markdown_report,
+                file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+        
+        with col2:
+            # 生成PDF
+            with st.spinner("📄 正在生成PDF..."):
+                try:
+                    pdf_bytes = markdown_to_pdf(markdown_report)
+                    if pdf_bytes:
+                        st.download_button(
+                            label="📑 下载PDF报告（A4打印）",
+                            data=pdf_bytes,
+                            file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                            type="primary",
+                            help="适合直接打印到A4纸，方便孩子练习"
+                        )
+                    else:
+                        st.error("PDF生成失败，请使用Markdown下载")
+                except Exception as e:
+                    st.error(f"PDF生成出错: {str(e)[:100]}")
+                    st.warning("请使用Markdown格式下载")
         
         # 阻止继续分析
         st.stop()
