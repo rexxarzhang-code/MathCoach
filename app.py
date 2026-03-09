@@ -1739,42 +1739,69 @@ with st.sidebar:
     """)
 
 # 主界面
-# 检查是否有需要重新加载的图片和分析记录
-if 'reload_image' in st.session_state or 'reload_record' in st.session_state:
+# 检查是否有从历史记录reload的图片
+if 'reload_image' in st.session_state:
     # 将图片字节数据转换为Image对象
-    if 'reload_image' in st.session_state:
-        reload_img_data = st.session_state['reload_image']
-        image = Image.open(BytesIO(reload_img_data))
-        del st.session_state['reload_image']
+    reload_img_data = st.session_state['reload_image']
+    image = Image.open(BytesIO(reload_img_data))
     
-    # 检查是否有历史分析记录
-    if 'reload_record' in st.session_state:
-        st.info("📥 已从历史记录加载分析结果")
+    # 清除reload标记
+    del st.session_state['reload_image']
+    
+    # 执行去重检查
+    if cos_client and 'duplicate_check_done' not in st.session_state:
+        with st.spinner("🔍 正在加载历史分析..."):
+            # 检查是否重复
+            duplicate_check = check_image_duplicate(reload_img_data)
+            st.session_state['duplicate_check'] = duplicate_check
+            st.session_state['duplicate_check_done'] = True
+    
+    # 如果找到历史分析，显示它
+    if st.session_state.get('duplicate_check', {}).get('is_duplicate', False):
+        dup_info = st.session_state['duplicate_check']
         
-        record = st.session_state['reload_record']
-        del st.session_state['reload_record']
+        # 格式化时间
+        friendly_time = format_friendly_time(dup_info['upload_time'])
+        
+        st.info(f"📥 已加载 **{friendly_time}** 的分析结果")
+        
+        record = dup_info['record']
         
         # 显示图片
         st.subheader("📷 原题")
         st.image(image, use_column_width=True)
         
-        # 显示分析结果
-        st.divider()
-        st.subheader("📚 知识点分析")
-        st.markdown(record['analysis'].get('knowledge_points', '暂无内容'), unsafe_allow_html=True)
+        # 显示分析时间
+        if 'timestamp' in record:
+            st.caption(f"🕐 分析时间：{record['timestamp']}")
         
         st.divider()
-        st.subheader("🔍 错因诊断")
-        st.markdown(record['analysis'].get('error_diagnosis', '暂无内容'), unsafe_allow_html=True)
+        
+        # 显示知识点分析
+        if 'analysis' in record and 'knowledge_points' in record['analysis']:
+            with st.expander("📚 知识点分析", expanded=True):
+                st.markdown(record['analysis']['knowledge_points'])
+        
+        # 显示错因诊断
+        if 'analysis' in record and 'error_diagnosis' in record['analysis']:
+            with st.expander("🔍 错因诊断", expanded=True):
+                st.markdown(record['analysis']['error_diagnosis'])
+        
+        # 显示延展练习
+        if 'analysis' in record and 'exercises' in record['analysis']:
+            with st.expander("💪 延展练习", expanded=True):
+                st.markdown(record['analysis']['exercises'])
         
         st.divider()
-        st.subheader("💪 延展练习")
-        st.markdown(record['analysis'].get('exercises', '暂无内容'), unsafe_allow_html=True)
         
-        # 生成Markdown报告（用于下载）
-        markdown_report = f"""# 数学错题分析报告
+        # 提供下载按钮
+        st.markdown("### 📥 导出报告")
+        
+        # 生成Markdown报告
+        markdown_report = f"""# 📊 数学错题分析报告
 
-**分析时间**: {record.get('timestamp', '未知')}
+## 🕐 分析时间
+{record.get('timestamp', '未记录')}
 
 ---
 
@@ -1799,10 +1826,6 @@ if 'reload_image' in st.session_state or 'reload_record' in st.session_state:
         # 生成StackEdit URL
         encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
         stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
-        
-        # 下载按钮
-        st.divider()
-        st.subheader("📥 导出报告")
         
         col1, col2, col3 = st.columns(3)
         
@@ -1845,229 +1868,16 @@ if 'reload_image' in st.session_state or 'reload_record' in st.session_state:
         
         st.stop()
     else:
-        # 只有图片，没有分析记录，提供重新分析选项
-        st.info("📥 已从历史记录加载图片，正在准备重新分析...")
-        
-        # 显示图片
+        # 没有找到历史记录，显示图片并允许重新分析
+        st.warning("⚠️ 未找到该图片的历史分析记录")
         st.subheader("📷 原题")
         st.image(image, use_column_width=True)
         
-        # 重置去重检查状态，允许重新分析
+        st.info("您可以点击下方按钮开始分析此题目")
+        
+        # 重置去重检查状态，允许分析
         st.session_state.pop('duplicate_check_done', None)
         st.session_state.pop('duplicate_check', None)
-        st.session_state.pop('last_file_id', None)
-        
-        # 快速操作按钮
-        st.divider()
-        st.subheader("🎯 快速操作")
-        
-        # 开始分析按钮
-        analysis_clicked = st.button("🚀 开始分析", type="primary", use_container_width=True)
-        
-        # 分析逻辑
-        if analysis_clicked:
-            st.session_state['analysis_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # 上传错题图片到 COS
-            if cos_client:
-                with st.spinner("📤 正在保存错题到云端..."):
-                    # 将图片转换为字节流
-                    img_byte_arr = BytesIO()
-                    image.save(img_byte_arr, format=image.format or 'PNG')
-                    img_byte_arr.seek(0)
-                    image_bytes = img_byte_arr.getvalue()
-                    
-                    # 上传到COS
-                    analysis_id = upload_image_to_cos(image_bytes)
-                    st.session_state['analysis_id'] = analysis_id
-            
-            # 准备图片列表（只有错题图）
-            images = [image]
-            
-            # 知识点分析
-            st.divider()
-            st.subheader("📚 知识点分析")
-            text_area = st.empty()
-            
-            knowledge_analysis_text = ""
-            try:
-                with st.spinner("🔍 正在分析知识点..."):
-                    response_stream = call_vision_model(KNOWLEDGE_PROMPT, images, stream=True)
-                    
-                    # 检查响应类型
-                    if isinstance(response_stream, str):
-                        # 非流式结果，直接显示
-                        knowledge_analysis_text = response_stream
-                        text_area.markdown(knowledge_analysis_text, unsafe_allow_html=True)
-                    else:
-                        # 流式处理
-                        for chunk in stream_knowledge_response(response_stream):
-                            knowledge_analysis_text += chunk
-                            text_area.text(knowledge_analysis_text)
-                        
-                        text_area.markdown(knowledge_analysis_text, unsafe_allow_html=True)
-                    
-                    st.session_state['knowledge_analysis'] = knowledge_analysis_text
-            except Exception as e:
-                error_msg = f"❌ 知识点分析失败: {str(e)}"
-                st.error(error_msg)
-                text_area.markdown(error_msg)
-                st.stop()
-            
-            # 错因诊断
-            st.divider()
-            st.subheader("🔍 错因诊断")
-            text_area = st.empty()
-            
-            error_diagnosis_text = ""
-            try:
-                with st.spinner("🔬 正在诊断错因..."):
-                    response_stream = call_vision_model(ERROR_DIAGNOSIS_PROMPT, images, stream=True)
-                    
-                    # 检查响应类型
-                    if isinstance(response_stream, str):
-                        # 非流式结果，直接显示
-                        error_diagnosis_text = response_stream
-                        text_area.markdown(error_diagnosis_text, unsafe_allow_html=True)
-                    else:
-                        # 流式处理
-                        for chunk in stream_diagnosis_response(response_stream):
-                            error_diagnosis_text += chunk
-                            text_area.text(error_diagnosis_text)
-                        
-                        text_area.markdown(error_diagnosis_text, unsafe_allow_html=True)
-                    
-                    st.session_state['error_diagnosis'] = error_diagnosis_text
-            except Exception as e:
-                error_msg = f"❌ 错因诊断失败: {str(e)}"
-                st.error(error_msg)
-                text_area.markdown(error_msg)
-                st.stop()
-            
-            # 延展练习
-            st.divider()
-            st.subheader("💪 延展练习")
-            text_area = st.empty()
-            
-            exercises_text = ""
-            try:
-                with st.spinner("💪 正在生成延展练习..."):
-                    response_stream = call_vision_model(EXERCISES_PROMPT, images, stream=True)
-                    
-                    # 检查响应类型
-                    if isinstance(response_stream, str):
-                        # 非流式结果，直接显示
-                        exercises_text = response_stream
-                        text_area.markdown(exercises_text, unsafe_allow_html=True)
-                    else:
-                        # 流式处理
-                        for chunk in stream_exercises_response(response_stream):
-                            exercises_text += chunk
-                            text_area.text(exercises_text)
-                        
-                        text_area.markdown(exercises_text, unsafe_allow_html=True)
-                    
-                    st.session_state['exercises'] = exercises_text
-            except Exception as e:
-                error_msg = f"❌ 延展练习生成失败: {str(e)}"
-                st.error(error_msg)
-                text_area.markdown(error_msg)
-                st.stop()
-            
-            # 保存分析结果到 COS
-            if cos_client and 'analysis_id' in st.session_state:
-                with st.spinner("💾 正在保存分析结果..."):
-                    analysis_id = st.session_state['analysis_id']
-                    
-                    # 组装完整分析结果
-                    analysis_data = {
-                        'knowledge_points': knowledge_analysis_text,
-                        'error_diagnosis': error_diagnosis_text,
-                        'exercises': exercises_text
-                    }
-                    
-                    # 保存分析结果
-                    save_success = save_analysis_to_cos(analysis_id, analysis_data)
-                    
-                    if save_success:
-                        st.success("✅ 分析结果已保存到云端！")
-                    else:
-                        st.warning("⚠️ 分析完成，但保存到云端失败")
-            
-            # 显示完成提示
-            st.success("🎉 分析完成！")
-            
-            # 生成Markdown报告（用于下载）
-            markdown_report = f"""# 数学错题分析报告
-
-**分析时间**: {st.session_state.get('analysis_time', '未知')}
-
----
-
-## 📚 知识点分析
-{knowledge_analysis_text}
-
----
-
-## 🔍 错因诊断
-{error_diagnosis_text}
-
----
-
-## 💪 延展练习
-{exercises_text}
-
----
-
-*本报告由数学错题分析系统自动生成*
-"""
-            
-            # 生成StackEdit URL
-            encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
-            stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
-            
-            # 下载按钮
-            st.divider()
-            st.subheader("📥 导出报告")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.download_button(
-                    label="📥 下载Markdown",
-                    data=markdown_report,
-                    file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
-            
-            with col2:
-                # 生成PDF
-                with st.spinner("📄 正在生成PDF..."):
-                    try:
-                        pdf_bytes = markdown_to_pdf(markdown_report)
-                        if pdf_bytes:
-                            st.download_button(
-                                label="📑 下载PDF",
-                                data=pdf_bytes,
-                                file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                                mime="application/pdf",
-                                use_container_width=True,
-                                help="适合直接打印到A4纸"
-                            )
-                        else:
-                            st.error("PDF生成失败")
-                    except Exception as e:
-                        st.error(f"PDF出错: {str(e)[:50]}")
-            
-            with col3:
-                st.link_button(
-                    label="🖨️ StackEdit打印",
-                    url=stackedit_url,
-                    use_container_width=True,
-                    type="primary",
-                    help="📱 手机端推荐! 一键在StackEdit中打开,完美支持数学公式打印"
-                )
         
         st.stop()
 
@@ -2576,45 +2386,10 @@ if st.session_state.get('show_history', False):
                             st.markdown(f"**文件大小**: 未知")
                         
                         if st.button("🔍 查看分析", key=f"reanalyze_{idx}"):
-                            # 加载历史分析结果
-                            # 查找对应的分析记录
-                            analysis_id = item['key'].replace('images/', 'records/').replace('.png', '.json').replace('.jpg', '.json').replace('.jpeg', '.json')
-                            
-                            # 尝试查找对应的记录文件
-                            # 由于上传时文件名格式可能变化，需要搜索
-                            try:
-                                # 提取原始文件名（去掉路径和扩展名）
-                                original_name = os.path.splitext(os.path.basename(item['key']))[0]
-                                
-                                # 搜索records目录下包含该文件名的JSON
-                                records_response = cos_client.list_objects(
-                                    Bucket=TENCENT_COS_BUCKET,
-                                    Prefix='records/',
-                                    MaxKeys=1000
-                                )
-                                
-                                record_found = None
-                                if 'Contents' in records_response:
-                                    for record_item in records_response['Contents']:
-                                        record_key = record_item['Key']
-                                        # 匹配包含原始文件名的记录
-                                        if original_name in record_key and record_key.endswith('.json'):
-                                            # 下载记录
-                                            record_data = download_from_cos(record_key)
-                                            if record_data:
-                                                record_found = json.loads(record_data.decode('utf-8'))
-                                                break
-                                
-                                if record_found:
-                                    # 加载记录和图片
-                                    st.session_state['reload_record'] = record_found
-                                    st.session_state['reload_image'] = img_data
-                                    st.session_state['show_history'] = False
-                                    st.rerun()
-                                else:
-                                    st.error("❌ 未找到该错题的分析记录，可能已被删除")
-                            except Exception as e:
-                                st.error(f"❌ 加载分析记录失败: {str(e)}")
+                            # 保存图片数据，触发去重检查显示历史分析
+                            st.session_state['reload_image'] = img_data
+                            st.session_state['show_history'] = False
+                            st.rerun()
     
     st.stop()
 
