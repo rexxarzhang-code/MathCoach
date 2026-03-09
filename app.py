@@ -186,9 +186,19 @@ def call_vision_model(prompt, images, model_type='qwen', stream=False):
         stream: 是否流式输出
     """
     if model_type in ['qwen', 'qwen-max'] and qwen_client:
-        # 获取对应的model_id
-        model_id = AVAILABLE_MODELS[model_type]['model_id']
-        return call_qwen_vision(prompt, images, stream=stream, model_id=model_id)
+        try:
+            # 获取对应的model_id
+            model_id = AVAILABLE_MODELS[model_type]['model_id']
+            return call_qwen_vision(prompt, images, stream=stream, model_id=model_id)
+        except Exception as qwen_error:
+            # 如果是配额错误且Gemini可用,自动降级
+            error_msg = str(qwen_error).lower()
+            if ('403' in error_msg or 'quota' in error_msg or 'free tier' in error_msg) and GEMINI_API_KEY:
+                import streamlit as st
+                st.warning("⚠️ 千问配额不足,已自动切换到Gemini模型")
+                return call_gemini_vision(prompt, images, stream=stream)
+            else:
+                raise qwen_error
     elif model_type == 'gemini' and GEMINI_API_KEY:
         return call_gemini_vision(prompt, images, stream=stream)
     else:
