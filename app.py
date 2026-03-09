@@ -9,17 +9,15 @@ from io import BytesIO
 import base64
 from datetime import datetime
 import re
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
 from qcloud_cos import CosConfig, CosS3Client
 import hashlib
 import json
 import urllib.parse
+
+# 版本信息
+APP_VERSION = "v1.2.0"
+APP_BUILD_DATE = "2026-03-09"
 
 # 加载环境变量
 load_dotenv()
@@ -726,6 +724,108 @@ def download_from_cos(cos_key):
         st.error(f"下载失败: {str(e)}")
         return None
 
+def delete_from_cos(cos_key):
+    """
+    从 COS 删除文件
+    
+    Args:
+        cos_key: COS 对象键
+    
+    Returns:
+        dict: {'success': bool, 'error': str}
+    """
+    if not cos_client:
+        return {'success': False, 'error': 'COS 未配置'}
+    
+    try:
+        cos_client.delete_object(
+            Bucket=TENCENT_COS_BUCKET,
+            Key=cos_key
+        )
+        return {'success': True, 'error': None}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def delete_history_record(image_key):
+    """
+    删除历史记录（包括图片和对应的JSON分析）
+    
+    Args:
+        image_key: 图片的 COS 键（images/路径）
+    
+    Returns:
+        dict: {'success': bool, 'deleted_files': list, 'error': str}
+    """
+    if not cos_client:
+        return {'success': False, 'error': 'COS 未配置', 'deleted_files': []}
+    
+    deleted_files = []
+    errors = []
+    
+    try:
+        # 1. 删除图片文件
+        result = delete_from_cos(image_key)
+        if result['success']:
+            deleted_files.append(image_key)
+        else:
+            errors.append(f"删除图片失败: {result['error']}")
+        
+        # 2. 查找并删除对应的JSON分析记录
+        # 从图片key提取文件名信息（时间戳_hash）
+        # 例如：images/2026/03/20260309_135113_f4c676a9_reload_20260309_135113.png
+        # 对应：records/2026/03/20260309_*_reload_20260309_135113.png.json
+        
+        if 'images/' in image_key:
+            # 提取完整文件名
+            file_name = image_key.split('/')[-1]  # 获取文件名
+            parts = file_name.split('_')
+            if len(parts) >= 2:
+                timestamp = parts[0]  # 20260309
+                
+                # 构建records路径前缀（与save_analysis_record中的格式一致）
+                year = timestamp[:4]
+                month = timestamp[4:6]
+                search_prefix = f"records/{year}/{month}/"
+                
+                # 查找匹配的JSON文件（根据原始图片文件名匹配）
+                response = cos_client.list_objects(
+                    Bucket=TENCENT_COS_BUCKET,
+                    Prefix=search_prefix,
+                    MaxKeys=100
+                )
+                
+                if 'Contents' in response:
+                    for item in response['Contents']:
+                        json_key = item['Key']
+                        # 检查JSON文件名是否包含原始图片文件名
+                        # records/2026/03/20260309_135113_reload_20260309_135113.png.json
+                        if json_key.endswith('.json') and file_name in json_key:
+                            result = delete_from_cos(json_key)
+                            if result['success']:
+                                deleted_files.append(json_key)
+                            else:
+                                errors.append(f"删除JSON失败: {result['error']}")
+        
+        if errors:
+            return {
+                'success': False, 
+                'error': '; '.join(errors),
+                'deleted_files': deleted_files
+            }
+        else:
+            return {
+                'success': True, 
+                'error': None,
+                'deleted_files': deleted_files
+            }
+            
+    except Exception as e:
+        return {
+            'success': False, 
+            'error': str(e),
+            'deleted_files': deleted_files
+        }
+
 def format_friendly_time(time_str):
     """
     将 ISO 8601 时间格式转换为友好格式
@@ -1206,394 +1306,9 @@ def convert_latex_to_text(text):
     
     return text
 
-def _markdown_to_pdf_html_disabled(markdown_text, output_path=None):
-    """
-    将Markdown转换为PDF（通过HTML渲染，支持数学公式）
-    
-    使用xhtml2pdf将Markdown转HTML再转PDF，纯Python实现，无需系统依赖。
-    
-    Args:
-        markdown_text: Markdown格式的文本（包含LaTeX公式）
-        output_path: 输出PDF文件路径（可选）
-    
-    Returns:
-        bytes: PDF文件的字节流
-    """
-    try:
-        # 将Markdown转为HTML
-        html_content = md.markdown(
-            markdown_text,
-            extensions=[
-                'extra',  # 支持表格、定义列表等
-                'codehilite',  # 代码高亮
-                'fenced_code',  # 围栏代码块
-                'tables',  # 表格支持
-            ]
-        )
-        
-        # 创建完整的HTML文档，包含样式
-        # 注意：xhtml2pdf对CSS支持有限，使用简化的样式
-        full_html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>数学错题分析报告</title>
-    <style>
-        @page {{
-            size: a4;
-            margin: 2cm;
-        }}
-        
-        body {{
-            font-family: "SimHei", "Microsoft YaHei", "PingFang SC", sans-serif;
-            font-size: 12pt;
-            line-height: 1.6;
-            color: #333;
-        }}
-        
-        h1 {{
-            font-size: 20pt;
-            color: #2c3e50;
-            text-align: center;
-            margin: 15px 0;
-            padding-bottom: 8px;
-            border-bottom: 2px solid #3498db;
-        }}
-        
-        h2 {{
-            font-size: 16pt;
-            color: #34495e;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            padding-left: 8px;
-            border-left: 4px solid #3498db;
-        }}
-        
-        h3 {{
-            font-size: 14pt;
-            color: #555;
-            margin-top: 12px;
-            margin-bottom: 6px;
-        }}
-        
-        h4 {{
-            font-size: 12pt;
-            color: #666;
-            margin-top: 10px;
-            margin-bottom: 5px;
-        }}
-        
-        p {{
-            margin: 6px 0;
-        }}
-        
-        ul, ol {{
-            margin: 6px 0;
-            padding-left: 20px;
-        }}
-        
-        li {{
-            margin: 4px 0;
-        }}
-        
-        strong {{
-            color: #2c3e50;
-            font-weight: bold;
-        }}
-        
-        code {{
-            background-color: #f5f5f5;
-            padding: 2px 4px;
-            font-family: "Courier New", monospace;
-            font-size: 11pt;
-        }}
-        
-        pre {{
-            background-color: #f5f5f5;
-            padding: 10px;
-            border-left: 3px solid #3498db;
-        }}
-        
-        hr {{
-            border: none;
-            border-top: 1px solid #ddd;
-            margin: 15px 0;
-        }}
-        
-        blockquote {{
-            background-color: #f0f8ff;
-            border-left: 4px solid #3498db;
-            padding: 8px 12px;
-            margin: 10px 0;
-        }}
-    </style>
-</head>
-<body>
-    {html_content}
-</body>
-</html>
-"""
-        
-        # 使用xhtml2pdf生成PDF
-        buffer = BytesIO()
-        pisa_status = pisa.CreatePDF(
-            full_html,
-            dest=buffer,
-            encoding='utf-8'
-        )
-        
-        # 检查是否成功
-        if pisa_status.err:
-            st.error(f"xhtml2pdf生成失败，错误码: {pisa_status.err}")
-            return None
-        
-        # 获取PDF字节流
-        pdf_bytes = buffer.getvalue()
-        buffer.close()
-        
-        # 如果指定了输出路径，保存文件
-        if output_path:
-            with open(output_path, 'wb') as f:
-                f.write(pdf_bytes)
-        
-        return pdf_bytes
-        
-    except Exception as e:
-        st.error(f"HTML转PDF失败: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None
 
-def markdown_to_pdf(markdown_text, output_path=None):
-    """
-    将Markdown转换为PDF（A4尺寸，支持中文和LaTeX数学公式）
-    
-    备用方案：使用reportlab生成PDF（LaTeX公式会转为文本）
-    
-    Args:
-        markdown_text: Markdown格式的文本
-        output_path: 输出PDF文件路径（可选，如果不提供则返回字节流）
-    
-    Returns:
-        bytes: PDF文件的字节流
-    """
-    try:
-        # 创建PDF缓冲区
-        buffer = BytesIO()
-        
-        # 创建PDF文档（A4尺寸）
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=2*cm,
-            leftMargin=2*cm,
-            topMargin=2*cm,
-            bottomMargin=2*cm
-        )
-        
-        # 注册中文字体（使用系统自带的中文字体）
-        try:
-            # macOS系统字体路径
-            font_paths = [
-                '/System/Library/Fonts/STHeiti Light.ttc',  # 华文黑体
-                '/System/Library/Fonts/PingFang.ttc',  # 苹方
-                '/Library/Fonts/Songti.ttc',  # 宋体
-            ]
-            
-            font_registered = False
-            for font_path in font_paths:
-                if os.path.exists(font_path):
-                    try:
-                        pdfmetrics.registerFont(TTFont('Chinese', font_path))
-                        font_registered = True
-                        break
-                    except:
-                        continue
-            
-            if not font_registered:
-                # 如果系统字体不可用，使用默认字体
-                chinese_font = 'Helvetica'
-            else:
-                chinese_font = 'Chinese'
-        except Exception as e:
-            chinese_font = 'Helvetica'
-        
-        # 定义样式
-        styles = getSampleStyleSheet()
-        
-        # 标题样式
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontName=chinese_font,
-            fontSize=20,
-            textColor='#2c3e50',
-            spaceAfter=20,
-            alignment=TA_CENTER,
-            leading=28
-        )
-        
-        # 二级标题样式
-        heading2_style = ParagraphStyle(
-            'CustomHeading2',
-            parent=styles['Heading2'],
-            fontName=chinese_font,
-            fontSize=16,
-            textColor='#34495e',
-            spaceBefore=16,
-            spaceAfter=12,
-            leading=22
-        )
-        
-        # 三级标题样式
-        heading3_style = ParagraphStyle(
-            'CustomHeading3',
-            parent=styles['Heading3'],
-            fontName=chinese_font,
-            fontSize=14,
-            textColor='#555555',
-            spaceBefore=12,
-            spaceAfter=8,
-            leading=20
-        )
-        
-        # 正文样式
-        body_style = ParagraphStyle(
-            'CustomBody',
-            parent=styles['BodyText'],
-            fontName=chinese_font,
-            fontSize=11,
-            leading=18,
-            textColor='#333333',
-            spaceAfter=8,
-            alignment=TA_LEFT
-        )
-        
-        # 解析Markdown并构建PDF内容
-        story = []
-        lines = markdown_text.split('\n')
-        
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            if not line:
-                i += 1
-                continue
-            
-            # 一级标题
-            if line.startswith('# '):
-                text = line[2:].strip()
-                story.append(Paragraph(text, title_style))
-                story.append(Spacer(1, 0.3*cm))
-            
-            # 二级标题
-            elif line.startswith('## '):
-                text = line[3:].strip()
-                # 移除emoji
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text).strip()
-                story.append(Spacer(1, 0.3*cm))
-                story.append(Paragraph(f'<b>{text}</b>', heading2_style))
-            
-            # 三级标题
-            elif line.startswith('### '):
-                text = line[4:].strip()
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text).strip()
-                story.append(Paragraph(f'<b>{text}</b>', heading3_style))
-            
-            # 四级标题
-            elif line.startswith('#### '):
-                text = line[5:].strip()
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text).strip()
-                story.append(Paragraph(f'<b>{text}</b>', body_style))
-            
-            # 分隔线
-            elif line.startswith('---'):
-                story.append(Spacer(1, 0.5*cm))
-                story.append(Paragraph('<hr/>', body_style))
-                story.append(Spacer(1, 0.5*cm))
-            
-            # 列表项
-            elif line.startswith('- ') or line.startswith('* '):
-                text = line[2:].strip()
-                # 先转换LaTeX公式
-                text = convert_latex_to_text(text)
-                # 移除行内数学公式的$符号
-                text = re.sub(r'\$([^$]+)\$', r'\1', text)
-                # 处理粗体标记（使用正则表达式正确匹配成对的**）
-                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-                # 移除emoji
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text)
-                # 先转义HTML特殊字符（防止<>被误认为标签）
-                text = text.replace('&', '&amp;')
-                text = text.replace('<', '&lt;')
-                text = text.replace('>', '&gt;')
-                # 处理粗体（此时<b>标签是我们故意加的）
-                text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-                story.append(Paragraph(f'• {text}', body_style))
-            
-            # 数字列表
-            elif re.match(r'^\d+\.\s', line):
-                text = re.sub(r'^\d+\.\s', '', line).strip()
-                # 先转换LaTeX公式
-                text = convert_latex_to_text(text)
-                # 移除行内数学公式的$符号
-                text = re.sub(r'\$([^$]+)\$', r'\1', text)
-                # 处理粗体标记（使用正则表达式正确匹配成对的**）
-                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-                # 移除emoji
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text)
-                # 先转义HTML特殊字符
-                text = text.replace('&', '&amp;')
-                text = text.replace('<', '&lt;')
-                text = text.replace('>', '&gt;')
-                # 恢复我们的粗体标签
-                text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-                story.append(Paragraph(text, body_style))
-            
-            # 普通段落
-            else:
-                text = line
-                # 先转换LaTeX公式
-                text = convert_latex_to_text(text)
-                # 移除行内数学公式的$符号，保留公式内容
-                text = re.sub(r'\$\$([^$]+)\$\$', r'【\1】', text)  # 块级公式
-                text = re.sub(r'\$([^$]+)\$', r'\1', text)  # 行内公式
-                # 处理粗体
-                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-                # 移除emoji
-                text = re.sub(r'[\U0001F300-\U0001F9FF]', '', text)
-                # 先转义HTML特殊字符
-                text = text.replace('&', '&amp;')
-                text = text.replace('<', '&lt;')
-                text = text.replace('>', '&gt;')
-                # 恢复我们的粗体标签
-                text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-                
-                if text.strip():
-                    story.append(Paragraph(text, body_style))
-            
-            i += 1
-        
-        # 构建PDF
-        doc.build(story)
-        
-        # 获取PDF字节流
-        pdf_bytes = buffer.getvalue()
-        buffer.close()
-        
-        if output_path:
-            with open(output_path, 'wb') as f:
-                f.write(pdf_bytes)
-        
-        return pdf_bytes
-        
-    except Exception as e:
-        st.error(f"PDF生成失败: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None
+
+
 
 # Streamlit UI
 st.set_page_config(page_title="数学错题AI教练", page_icon="📐", layout="wide")
@@ -1737,6 +1452,10 @@ with st.sidebar:
     - 如遇配额错误,请明天再试
     - 或访问 [Google AI Studio](https://ai.google.dev/) 升级
     """)
+    
+    # 版本号显示（调试用）
+    st.divider()
+    st.caption(f"🔧 {APP_VERSION} ({APP_BUILD_DATE})")
 
 # 主界面
 # 检查是否有从历史记录reload的图片
@@ -1827,7 +1546,7 @@ if 'reload_image' in st.session_state:
         encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
         stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             st.download_button(
@@ -1839,25 +1558,6 @@ if 'reload_image' in st.session_state:
             )
         
         with col2:
-            # 生成PDF
-            with st.spinner("📄 正在生成PDF..."):
-                try:
-                    pdf_bytes = markdown_to_pdf(markdown_report)
-                    if pdf_bytes:
-                        st.download_button(
-                            label="📑 下载PDF",
-                            data=pdf_bytes,
-                            file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                            help="适合直接打印到A4纸"
-                        )
-                    else:
-                        st.error("PDF生成失败")
-                except Exception as e:
-                    st.error(f"PDF出错: {str(e)[:50]}")
-        
-        with col3:
             st.link_button(
                 label="🖨️ StackEdit打印",
                 url=stackedit_url,
@@ -1865,6 +1565,7 @@ if 'reload_image' in st.session_state:
                 type="primary",
                 help="📱 手机端推荐! 一键在StackEdit中打开,完美支持数学公式打印"
             )
+
         
         st.stop()
     else:
@@ -1873,56 +1574,86 @@ if 'reload_image' in st.session_state:
         st.subheader("📷 原题")
         st.image(image, use_column_width=True)
         
-        st.info("您可以点击下方按钮开始分析此题目")
+        st.info("💡 您可以直接点击下方\"开始分析\"按钮，对这张图片进行AI分析")
         
         # 重置去重检查状态，允许分析
         st.session_state.pop('duplicate_check_done', None)
         st.session_state.pop('duplicate_check', None)
         
-        st.stop()
+        # 将图片数据保存到session_state，作为"已上传"的图片
+        # 这样后面的分析逻辑就能直接使用
+        st.session_state['reload_image_for_analysis'] = reload_img_data
+        st.session_state['reload_image_object'] = image
+        st.session_state['image_already_displayed'] = True  # 标记图片已显示
 
-uploaded_files = st.file_uploader(
-    "📤 上传图片", 
-    type=['png', 'jpg', 'jpeg'],
-    accept_multiple_files=True,
-    help="第1张必须是错题本身，后续图片(最多3张)可以是草稿纸"
-)
+# 优先检查是否有正在分析/已分析的图片数据（rerun后恢复）
+if 'current_image' in st.session_state and 'knowledge_analysis' in st.session_state:
+    # 从session_state恢复图片数据
+    image = st.session_state['current_image']
+    uploaded_file = st.session_state.get('current_uploaded_file')
+    draft_files = st.session_state.get('current_draft_files', [])
+    uploaded_files = ['dummy']  # 标记有图片需要处理
+# 检查是否有从历史记录reload但未找到分析的图片
+elif 'reload_image_for_analysis' in st.session_state:
+    # 使用reload的图片数据
+    image = st.session_state['reload_image_object']
+    uploaded_file = None
+    draft_files = []
+    
+    # 不立即删除reload标记，保留到分析完成
+    # （否则点击"开始分析"按钮后页面刷新会丢失图片数据）
+    
+    # 跳过文件上传器，直接进入分析流程
+    uploaded_files = ['dummy']  # 标记有图片需要处理
+else:
+    uploaded_files = st.file_uploader(
+        "📤 上传图片", 
+        type=['png', 'jpg', 'jpeg'],
+        accept_multiple_files=True,
+        help="第1张必须是错题本身，后续图片(最多3张)可以是草稿纸"
+    )
+    
+    # 检测文件是否变化，如果变化则重置去重检查状态
+    if uploaded_files:
+        current_file_id = uploaded_files[0].file_id if hasattr(uploaded_files[0], 'file_id') else uploaded_files[0].name
+        if 'last_file_id' not in st.session_state or st.session_state['last_file_id'] != current_file_id:
+            # 文件已更换，重置去重检查状态
+            st.session_state['last_file_id'] = current_file_id
+            st.session_state.pop('duplicate_check_done', None)
+            st.session_state.pop('duplicate_check', None)
 
-# 检测文件是否变化，如果变化则重置去重检查状态
 if uploaded_files:
-    current_file_id = uploaded_files[0].file_id if hasattr(uploaded_files[0], 'file_id') else uploaded_files[0].name
-    if 'last_file_id' not in st.session_state or st.session_state['last_file_id'] != current_file_id:
-        # 文件已更换，重置去重检查状态
-        st.session_state['last_file_id'] = current_file_id
-        st.session_state.pop('duplicate_check_done', None)
-        st.session_state.pop('duplicate_check', None)
-
-if uploaded_files:
-    # 限制最多4张图片
-    if len(uploaded_files) > 4:
-        st.error("❌ 最多上传4张图片（1张错题+3张草稿）")
-        st.stop()
-    
-    # 第1张是错题，后续是草稿
-    uploaded_file = uploaded_files[0]
-    draft_files = uploaded_files[1:] if len(uploaded_files) > 1 else []
-    
-    # 显示原图
-    image = Image.open(uploaded_file)
-    
-    # 🔍 去重检查：检查这张图片是否已经分析过
-    if cos_client and 'duplicate_check_done' not in st.session_state:
-        with st.spinner("🔍 正在检查是否为重复图片..."):
-            # 将图片转换为字节
-            img_byte_arr = BytesIO()
-            image.save(img_byte_arr, format=image.format or 'PNG')
-            img_byte_arr.seek(0)
-            image_bytes = img_byte_arr.getvalue()
-            
-            # 检查是否重复
-            duplicate_check = check_image_duplicate(image_bytes)
-            st.session_state['duplicate_check'] = duplicate_check
-            st.session_state['duplicate_check_done'] = True
+    # 如果是从reload来的，跳过上传文件处理
+    if uploaded_files[0] != 'dummy':
+        # 限制最多4张图片
+        if len(uploaded_files) > 4:
+            st.error("❌ 最多上传4张图片（1张错题+3张草稿）")
+            st.stop()
+        
+        # 第1张是错题，后续是草稿
+        uploaded_file = uploaded_files[0]
+        draft_files = uploaded_files[1:] if len(uploaded_files) > 1 else []
+        
+        # 显示原图
+        image = Image.open(uploaded_file)
+        
+        # 🔍 去重检查：检查这张图片是否已经分析过（只对真正上传的文件检查）
+        if cos_client and 'duplicate_check_done' not in st.session_state:
+            with st.spinner("🔍 正在检查是否为重复图片..."):
+                # 将图片转换为字节
+                img_byte_arr = BytesIO()
+                image.save(img_byte_arr, format=image.format or 'PNG')
+                img_byte_arr.seek(0)
+                image_bytes = img_byte_arr.getvalue()
+                
+                # 检查是否重复
+                duplicate_check = check_image_duplicate(image_bytes)
+                st.session_state['duplicate_check'] = duplicate_check
+                st.session_state['duplicate_check_done'] = True
+    else:
+        # 从reload来的图片，已经在前面显示过了，且已确认无历史记录
+        # 这里不需要再做去重检查
+        pass
     
     # 如果是重复图片，显示提示和历史记录
     if st.session_state.get('duplicate_check', {}).get('is_duplicate', False):
@@ -2006,7 +1737,7 @@ if uploaded_files:
         encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
         stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             st.download_button(
@@ -2018,25 +1749,6 @@ if uploaded_files:
             )
         
         with col2:
-            # 生成PDF
-            with st.spinner("📄 正在生成PDF..."):
-                try:
-                    pdf_bytes = markdown_to_pdf(markdown_report)
-                    if pdf_bytes:
-                        st.download_button(
-                            label="📑 下载PDF",
-                            data=pdf_bytes,
-                            file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                            help="适合直接打印到A4纸"
-                        )
-                    else:
-                        st.error("PDF生成失败")
-                except Exception as e:
-                    st.error(f"PDF出错: {str(e)[:50]}")
-        
-        with col3:
             st.link_button(
                 label="🖨️ StackEdit打印",
                 url=stackedit_url,
@@ -2058,7 +1770,8 @@ if uploaded_files:
         with cols[0]:
             st.markdown("**错题**")
             st.image(image, use_column_width=True)
-            st.caption(f"📄 {uploaded_file.name}")
+            if uploaded_file:
+                st.caption(f"📄 {uploaded_file.name}")
         
         # 显示草稿（后续图片）
         for idx, draft_file in enumerate(draft_files):
@@ -2069,20 +1782,43 @@ if uploaded_files:
                 st.caption(f"📝 {draft_file.name}")
     else:
         # 只有错题，居中显示
-        st.subheader("📷 原题")
-        st.image(image, use_column_width=True)
+        # 如果已经有分析结果(rerun后)，或者是第一次显示，都要显示图片
+        # 只有在reload时首次显示过才跳过
+        should_display = True
+        if st.session_state.get('image_already_displayed', False) and 'knowledge_analysis' not in st.session_state:
+            # reload时已显示过，且还没有分析结果，跳过显示
+            should_display = False
+            st.session_state.pop('image_already_displayed', None)
+        
+        if should_display:
+            st.subheader("📷 原题")
+            st.image(image, use_column_width=True)
     
     
-    # 快速操作按钮
-    st.divider()
-    st.subheader("🎯 快速操作")
-    
-    # 开始分析按钮（占据全宽）
-    analysis_clicked = st.button("🚀 开始分析", type="primary", use_container_width=True)
+    # 快速操作按钮（只在没有分析结果时显示）
+    if 'knowledge_analysis' not in st.session_state:
+        st.divider()
+        st.subheader("🎯 快速操作")
+        
+        # 开始分析按钮（占据全宽）
+        analysis_clicked = st.button("🚀 开始分析", type="primary", use_container_width=True)
+    else:
+        # 已有分析结果，不显示开始分析按钮
+        analysis_clicked = False
     
     # 分析逻辑（在按钮外，占据全宽）
     if analysis_clicked:
         st.session_state['analysis_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 保存当前图片和文件信息到session_state，以便rerun后继续显示
+        st.session_state['current_image'] = image
+        st.session_state['current_uploaded_file'] = uploaded_file
+        st.session_state['current_draft_files'] = draft_files
+        
+        # 现在可以清除reload标记了（因为已经保存到current_*中）
+        st.session_state.pop('reload_image_for_analysis', None)
+        st.session_state.pop('reload_image_object', None)
+        st.session_state.pop('image_already_displayed', None)
         
         # 上传错题图片到 COS
         if cos_client:
@@ -2092,8 +1828,11 @@ if uploaded_files:
                 image.save(img_byte_arr, format=image.format or 'PNG')
                 img_byte_arr.seek(0)
                 
+                # 生成文件名（如果是reload的图片，使用时间戳生成）
+                file_name = uploaded_file.name if uploaded_file else f"reload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                
                 # 上传到 COS
-                upload_result = upload_to_cos(img_byte_arr, uploaded_file.name, file_type='image')
+                upload_result = upload_to_cos(img_byte_arr, file_name, file_type='image')
                 if upload_result['success']:
                     st.success("✅ 错题已保存到云端")
                     st.session_state['cos_image_key'] = upload_result['key']
@@ -2243,9 +1982,12 @@ if uploaded_files:
         if cos_client and st.session_state.get('cos_image_key'):
             status_placeholder.info("💾 正在保存分析记录...")
             try:
+                # 使用之前保存的文件名（如果是reload的图片，使用生成的文件名）
+                file_name = uploaded_file.name if uploaded_file else f"reload_{st.session_state.get('analysis_time', datetime.now().strftime('%Y%m%d_%H%M%S')).replace(':', '').replace(' ', '_').replace('-', '')}.png"
+                
                 save_result = save_analysis_record(
                     st.session_state['cos_image_key'],
-                    uploaded_file.name,
+                    file_name,
                     st.session_state.get('knowledge_analysis', ''),
                     st.session_state.get('error_diagnosis', ''),
                     st.session_state.get('exercises', '')
@@ -2283,8 +2025,11 @@ if uploaded_files:
         
         with tab4:
             # 首先生成报告
+            # 使用文件名（如果是reload的图片，使用默认名称）
+            file_name_for_report = uploaded_file.name if uploaded_file else "错题"
+            
             report = create_report(
-                uploaded_file.name,
+                file_name_for_report,
                 st.session_state['knowledge_analysis'],
                 st.session_state['error_diagnosis'],
                 st.session_state['exercises']
@@ -2296,41 +2041,25 @@ if uploaded_files:
             
             # 下载按钮放在最上方，更容易看到
             st.subheader("📥 导出报告")
-            st.info("💡 提示：PDF格式适合打印，Markdown格式适合数字存档，StackEdit适合手机端在线打印")
+            st.info("💡 提示：Markdown格式适合数字存档，StackEdit适合在线打印(手机端推荐)")
             
             # 下载按钮
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             
             with col1:
+                # 生成下载文件名
+                download_file_name = uploaded_file.name.split('.')[0] if uploaded_file else datetime.now().strftime('%Y%m%d_%H%M%S')
+                
                 st.download_button(
                     label="📥 下载Markdown",
                     data=report,
-                    file_name=f"错题分析_{uploaded_file.name.split('.')[0]}.md",
+                    file_name=f"错题分析_{download_file_name}.md",
                     mime="text/markdown",
                     use_container_width=True,
                     help="适合在支持Markdown的编辑器中查看"
                 )
             
             with col2:
-                # 生成PDF
-                with st.spinner("📄 正在生成PDF..."):
-                    try:
-                        pdf_bytes = markdown_to_pdf(report)
-                        if pdf_bytes:
-                            st.download_button(
-                                label="📑 下载PDF",
-                                data=pdf_bytes,
-                                file_name=f"错题分析_{uploaded_file.name.split('.')[0]}.pdf",
-                                mime="application/pdf",
-                                use_container_width=True,
-                                help="适合直接打印到A4纸"
-                            )
-                        else:
-                            st.error("PDF生成失败")
-                    except Exception as e:
-                        st.error(f"PDF出错: {str(e)[:50]}")
-            
-            with col3:
                 st.link_button(
                     label="🖨️ StackEdit打印",
                     url=stackedit_url,
@@ -2385,11 +2114,67 @@ if st.session_state.get('show_history', False):
                         except (TypeError, ValueError, ZeroDivisionError):
                             st.markdown(f"**文件大小**: 未知")
                         
-                        if st.button("🔍 查看分析", key=f"reanalyze_{idx}"):
+                        if st.button("🔍 查看分析", key=f"reanalyze_{idx}", use_container_width=True):
                             # 保存图片数据，触发去重检查显示历史分析
                             st.session_state['reload_image'] = img_data
                             st.session_state['show_history'] = False
                             st.rerun()
+                        
+                        # 删除按钮
+                        if st.button("🗑️ 删除", key=f"delete_{idx}", type="secondary", use_container_width=True):
+                            # 保存待删除的记录索引到session_state
+                            st.session_state[f'confirm_delete_{idx}'] = True
+                            st.rerun()
+                        
+                        # 二次确认对话框
+                        if st.session_state.get(f'confirm_delete_{idx}', False):
+                            st.warning("⚠️ **确认删除？**")
+                            st.markdown(f"即将删除错题: **{item['name']}**")
+                            st.error("🚨 删除后无法恢复！图片和分析记录将从云端永久移除。")
+                            
+                            col_confirm, col_cancel = st.columns(2)
+                            
+                            with col_confirm:
+                                if st.button("✅ 确认删除", key=f"confirm_{idx}", type="primary", use_container_width=True):
+                                    with st.spinner("🗑️ 正在删除错题记录..."):
+                                        result = delete_history_record(item['key'])
+                                        if result['success']:
+                                            deleted_count = len(result['deleted_files'])
+                                            st.success(f"✅ 成功删除 {deleted_count} 个相关文件")
+                                            
+                                            # 分类显示删除的文件
+                                            for file in result['deleted_files']:
+                                                if 'images/' in file:
+                                                    st.caption(f"🖼️ 图片: {file.split('/')[-1]}")
+                                                elif 'records/' in file:
+                                                    st.caption(f"📄 分析记录: {file.split('/')[-1]}")
+                                                else:
+                                                    st.caption(f"✓ {file}")
+                                            
+                                            st.info("💡 提示: 图片和对应的分析记录均已从云存储中移除")
+                                            st.balloons()
+                                            # 清除确认状态
+                                            st.session_state.pop(f'confirm_delete_{idx}', None)
+                                            # 延迟刷新，让用户看到成功消息
+                                            import time
+                                            time.sleep(2)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ 删除失败: {result['error']}")
+                                            if result['deleted_files']:
+                                                st.warning(f"⚠️ 部分文件已删除（共{len(result['deleted_files'])}个），但未完全清理")
+                                            # 清除确认状态
+                                            st.session_state.pop(f'confirm_delete_{idx}', None)
+                            
+                            with col_cancel:
+                                if st.button("❌ 取消", key=f"cancel_{idx}", use_container_width=True):
+                                    # 清除确认状态
+                                    st.session_state.pop(f'confirm_delete_{idx}', None)
+                                    st.rerun()
+    
+    # 版本号显示（调试用）
+    st.markdown("---")
+    st.caption(f"🔧 版本: {APP_VERSION} | 构建日期: {APP_BUILD_DATE}")
     
     st.stop()
 
@@ -2426,3 +2211,7 @@ elif not uploaded_files:
         - 针对性训练
         - 含答案和解析
         """)
+    
+    # 版本号显示（调试用）
+    st.markdown("---")
+    st.caption(f"🔧 版本: {APP_VERSION} | 构建日期: {APP_BUILD_DATE}")
