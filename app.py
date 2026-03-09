@@ -84,7 +84,7 @@ config = load_config()
 AVAILABLE_MODELS = {
     'qwen': {
         'name': '通义千问 Qwen3.5-Plus (最新最强)',
-        'model_id': 'qwen3.5-plus',
+        'model_id': 'qwen3.5-plus-2026-02-15',
         'available': QWEN_API_KEY is not None
     },
     'qwen-max': {
@@ -105,7 +105,7 @@ def encode_image_base64(image):
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def call_qwen_vision(prompt, images, stream=False, model_id='qwen3.5-plus'):
+def call_qwen_vision(prompt, images, stream=False, model_id='qwen3.5-plus-2026-02-15'):
     """调用千问视觉模型（支持多图）
     
     Args:
