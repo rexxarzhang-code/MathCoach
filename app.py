@@ -137,7 +137,7 @@ def call_qwen_vision(prompt, images, stream=False, model_id='qwen3.5-plus'):
                 'role': 'user',
                 'content': content
             }],
-            temperature=0.7,
+            temperature=0.3,  # 降低temperature减少触发内容审核的可能性
             stream=stream
         )
         if stream:
@@ -382,8 +382,40 @@ def diagnose_error(images, knowledge_analysis="", stream=False):
             result = call_vision_model(prompt, images, selected_model)
             return result
     except Exception as e:
-        if "quota" in str(e).lower() or "429" in str(e):
+        error_str = str(e).lower()
+        
+        # 配额错误
+        if "quota" in error_str or "429" in error_str:
             return "⚠️ **API配额已用完** - 请稍后重试或升级计划"
+        
+        # 内容审核错误 - 尝试切换模型或简化prompt
+        elif "datainspectionfailed" in error_str or "inappropriate content" in error_str:
+            # 如果是千问失败，尝试切换到 Gemini
+            if selected_model in ['qwen', 'qwen-max'] and GEMINI_API_KEY:
+                try:
+                    # 简化 prompt，移除可能触发审核的内容
+                    simplified_prompt = f"""
+请分析这道数学错题：
+
+1. **学生解题思路**: 学生是怎么思考的?
+2. **出错步骤**: 在哪一步出错了?
+3. **错误类型**: 概念理解/计算失误/审题不清/方法不当
+4. **改进建议**: 如何避免类似错误?
+
+请使用温和、鼓励的语气，用markdown格式输出。
+"""
+                    result = call_vision_model(simplified_prompt, images, 'gemini', stream=stream)
+                    # 添加提示说明使用了备用模型
+                    if stream:
+                        return result
+                    else:
+                        return f"⚠️ *（原模型内容审核失败，已自动切换到备用模型）*\n\n{result}"
+                except Exception as backup_error:
+                    return f"⚠️ **内容审核失败**\n\n千问模型触发内容审核，切换Gemini也失败。\n\n建议：\n1. 检查错题图片是否包含敏感内容\n2. 稍后重试\n3. 联系管理员\n\n错误: {str(backup_error)[:200]}"
+            else:
+                return f"⚠️ **内容审核失败**\n\nAI模型的安全审核机制被触发，可能原因：\n1. 图片内容被误判\n2. 生成的分析触发了敏感词检测\n\n建议：\n1. 尝试重新上传清晰的错题图片\n2. 稍后重试\n3. 如持续失败，请联系管理员\n\n错误详情: {str(e)[:200]}"
+        
+        # 其他错误
         else:
             return f"❌ **诊断失败**: {str(e)[:200]}"
 
