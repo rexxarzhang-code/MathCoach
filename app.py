@@ -2148,21 +2148,25 @@ if uploaded_files:
                 st.session_state['exercises']
             )
             
+            # 生成StackEdit URL
+            encoded_content = base64.b64encode(report.encode('utf-8')).decode('utf-8')
+            stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
+            
             # 下载按钮放在最上方，更容易看到
-            st.subheader("📥 下载完整报告")
-            st.info("💡 提示：PDF格式适合打印，Markdown格式适合数字存档")
+            st.subheader("📥 导出报告")
+            st.info("💡 提示：PDF格式适合打印，Markdown格式适合数字存档，StackEdit适合手机端在线打印")
             
             # 下载按钮
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.download_button(
-                    label="📥 下载Markdown报告",
+                    label="📥 下载Markdown",
                     data=report,
                     file_name=f"错题分析_{uploaded_file.name.split('.')[0]}.md",
                     mime="text/markdown",
                     use_container_width=True,
-                    help="适合在支持Markdown的编辑器中查看和编辑"
+                    help="适合在支持Markdown的编辑器中查看"
                 )
             
             with col2:
@@ -2172,19 +2176,26 @@ if uploaded_files:
                         pdf_bytes = markdown_to_pdf(report)
                         if pdf_bytes:
                             st.download_button(
-                                label="📑 下载PDF报告（A4打印）",
+                                label="📑 下载PDF",
                                 data=pdf_bytes,
                                 file_name=f"错题分析_{uploaded_file.name.split('.')[0]}.pdf",
                                 mime="application/pdf",
                                 use_container_width=True,
-                                type="primary",
-                                help="适合直接打印到A4纸，方便孩子练习"
+                                help="适合直接打印到A4纸"
                             )
                         else:
-                            st.error("PDF生成失败，请使用Markdown下载")
+                            st.error("PDF生成失败")
                     except Exception as e:
-                        st.error(f"PDF生成出错: {str(e)[:100]}")
-                        st.warning("请使用Markdown格式下载")
+                        st.error(f"PDF出错: {str(e)[:50]}")
+            
+            with col3:
+                st.link_button(
+                    label="🖨️ StackEdit打印",
+                    url=stackedit_url,
+                    use_container_width=True,
+                    type="primary",
+                    help="📱 手机端推荐! 一键在StackEdit中打开,完美支持数学公式打印"
+                )
             
             # 下载按钮后显示报告内容
             st.divider()
