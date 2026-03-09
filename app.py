@@ -19,6 +19,7 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from qcloud_cos import CosConfig, CosS3Client
 import hashlib
 import json
+import urllib.parse
 
 # 加载环境变量
 load_dotenv()
@@ -1822,11 +1823,9 @@ if uploaded_files:
         
         # 提供下载按钮
         st.markdown("### 📥 导出报告")
-        col1, col2 = st.columns(2)
         
-        with col1:
-            # 生成Markdown报告
-            markdown_report = f"""# 📊 数学错题分析报告
+        # 生成Markdown报告
+        markdown_report = f"""# 📊 数学错题分析报告
 
 ## 🕐 分析时间
 {record.get('timestamp', '未记录')}
@@ -1850,9 +1849,16 @@ if uploaded_files:
 
 *本报告由数学错题分析系统自动生成*
 """
-            
+        
+        # 生成StackEdit URL
+        encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
+        stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
             st.download_button(
-                label="📥 下载Markdown报告",
+                label="📥 下载Markdown",
                 data=markdown_report,
                 file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
                 mime="text/markdown",
@@ -1866,19 +1872,26 @@ if uploaded_files:
                     pdf_bytes = markdown_to_pdf(markdown_report)
                     if pdf_bytes:
                         st.download_button(
-                            label="📑 下载PDF报告（A4打印）",
+                            label="📑 下载PDF",
                             data=pdf_bytes,
                             file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                             mime="application/pdf",
                             use_container_width=True,
-                            type="primary",
-                            help="适合直接打印到A4纸，方便孩子练习"
+                            help="适合直接打印到A4纸"
                         )
                     else:
-                        st.error("PDF生成失败，请使用Markdown下载")
+                        st.error("PDF生成失败")
                 except Exception as e:
-                    st.error(f"PDF生成出错: {str(e)[:100]}")
-                    st.warning("请使用Markdown格式下载")
+                    st.error(f"PDF出错: {str(e)[:50]}")
+        
+        with col3:
+            st.link_button(
+                label="🖨️ StackEdit打印",
+                url=stackedit_url,
+                use_container_width=True,
+                type="primary",
+                help="📱 手机端推荐! 一键在StackEdit中打开,完美支持数学公式打印"
+            )
         
         # 阻止继续分析
         st.stop()
@@ -1962,18 +1975,25 @@ if uploaded_files:
                 st.markdown("### 📚 知识点分析")
                 text_area = st.empty()
                 
-                if selected_model == 'qwen' or selected_model == 'qwen-max':
-                    for chunk in stream_qwen_response(response_stream):
-                        knowledge_text += chunk
-                        # 使用code显示避免LaTeX渲染问题,最后才完整渲染
-                        text_area.text(knowledge_text)
-                else:  # gemini
-                    for chunk in stream_gemini_response(response_stream):
-                        knowledge_text += chunk
-                        text_area.text(knowledge_text)
-                
-                # 流式完成后,完整渲染markdown(包含LaTeX)
-                text_area.markdown(knowledge_text, unsafe_allow_html=True)
+                # 检查返回类型 - 可能是字符串(非流式)或流对象
+                if isinstance(response_stream, str):
+                    # 非流式结果,直接显示
+                    knowledge_text = response_stream
+                    text_area.markdown(knowledge_text, unsafe_allow_html=True)
+                else:
+                    # 流式处理
+                    if selected_model == 'qwen' or selected_model == 'qwen-max':
+                        for chunk in stream_qwen_response(response_stream):
+                            knowledge_text += chunk
+                            # 使用code显示避免LaTeX渲染问题,最后才完整渲染
+                            text_area.text(knowledge_text)
+                    else:  # gemini
+                        for chunk in stream_gemini_response(response_stream):
+                            knowledge_text += chunk
+                            text_area.text(knowledge_text)
+                    
+                    # 流式完成后,完整渲染markdown(包含LaTeX)
+                    text_area.markdown(knowledge_text, unsafe_allow_html=True)
             
             st.session_state['knowledge_analysis'] = knowledge_text
             status_placeholder.success("✅ 知识点分析完成!")
@@ -1992,17 +2012,24 @@ if uploaded_files:
                 st.markdown("### 🔍 错因诊断")
                 text_area = st.empty()
                 
-                if selected_model == 'qwen' or selected_model == 'qwen-max':
-                    for chunk in stream_qwen_response(response_stream):
-                        error_text += chunk
-                        text_area.text(error_text)
-                else:  # gemini
-                    for chunk in stream_gemini_response(response_stream):
-                        error_text += chunk
-                        text_area.text(error_text)
-                
-                # 流式完成后,完整渲染markdown(包含LaTeX)
-                text_area.markdown(error_text, unsafe_allow_html=True)
+                # 检查返回类型 - 可能是字符串(非流式)或流对象
+                if isinstance(response_stream, str):
+                    # 非流式结果,直接显示
+                    error_text = response_stream
+                    text_area.markdown(error_text, unsafe_allow_html=True)
+                else:
+                    # 流式处理
+                    if selected_model == 'qwen' or selected_model == 'qwen-max':
+                        for chunk in stream_qwen_response(response_stream):
+                            error_text += chunk
+                            text_area.text(error_text)
+                    else:  # gemini
+                        for chunk in stream_gemini_response(response_stream):
+                            error_text += chunk
+                            text_area.text(error_text)
+                    
+                    # 流式完成后,完整渲染markdown(包含LaTeX)
+                    text_area.markdown(error_text, unsafe_allow_html=True)
             
             st.session_state['error_diagnosis'] = error_text
             status_placeholder.success("✅ 错因诊断完成!")
@@ -2026,17 +2053,24 @@ if uploaded_files:
                     st.markdown("### 💪 延展练习")
                     text_area = st.empty()
                     
-                    if selected_model == 'qwen' or selected_model == 'qwen-max':
-                        for chunk in stream_qwen_response(response_stream):
-                            exercise_text += chunk
-                            text_area.text(exercise_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            exercise_text += chunk
-                            text_area.text(exercise_text)
-                    
-                    # 流式完成后,完整渲染markdown(包含LaTeX)
-                    text_area.markdown(exercise_text, unsafe_allow_html=True)
+                    # 检查返回类型 - 可能是字符串(非流式)或流对象
+                    if isinstance(response_stream, str):
+                        # 非流式结果,直接显示
+                        exercise_text = response_stream
+                        text_area.markdown(exercise_text, unsafe_allow_html=True)
+                    else:
+                        # 流式处理
+                        if selected_model == 'qwen' or selected_model == 'qwen-max':
+                            for chunk in stream_qwen_response(response_stream):
+                                exercise_text += chunk
+                                text_area.text(exercise_text)
+                        else:  # gemini
+                            for chunk in stream_gemini_response(response_stream):
+                                exercise_text += chunk
+                                text_area.text(exercise_text)
+                        
+                        # 流式完成后,完整渲染markdown(包含LaTeX)
+                        text_area.markdown(exercise_text, unsafe_allow_html=True)
                 
                 st.session_state['exercises'] = exercise_text
                 status_placeholder.success("✅ 全部分析完成!")
