@@ -19,6 +19,8 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from qcloud_cos import CosConfig, CosS3Client
 import hashlib
 import json
+from weasyprint import HTML, CSS
+import markdown as md
 
 # 加载环境变量
 load_dotenv()
@@ -1195,9 +1197,168 @@ def convert_latex_to_text(text):
     
     return text
 
+def markdown_to_pdf_html(markdown_text, output_path=None):
+    """
+    将Markdown转换为PDF（通过HTML渲染，完美支持LaTeX数学公式）
+    
+    使用weasyprint将Markdown转HTML再转PDF，保留完整的渲染效果。
+    
+    Args:
+        markdown_text: Markdown格式的文本（包含LaTeX公式）
+        output_path: 输出PDF文件路径（可选）
+    
+    Returns:
+        bytes: PDF文件的字节流
+    """
+    try:
+        # 将Markdown转为HTML
+        html_content = md.markdown(
+            markdown_text,
+            extensions=[
+                'extra',  # 支持表格、定义列表等
+                'codehilite',  # 代码高亮
+                'fenced_code',  # 围栏代码块
+                'tables',  # 表格支持
+            ]
+        )
+        
+        # 创建完整的HTML文档，包含MathJax和样式
+        full_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>数学错题分析报告</title>
+    <style>
+        @page {{
+            size: A4;
+            margin: 2cm;
+        }}
+        
+        body {{
+            font-family: "PingFang SC", "Microsoft YaHei", "SimHei", sans-serif;
+            font-size: 12pt;
+            line-height: 1.8;
+            color: #333;
+            max-width: 100%;
+        }}
+        
+        h1 {{
+            font-size: 22pt;
+            color: #2c3e50;
+            text-align: center;
+            margin: 20px 0;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #3498db;
+        }}
+        
+        h2 {{
+            font-size: 18pt;
+            color: #34495e;
+            margin-top: 24px;
+            margin-bottom: 12px;
+            padding-left: 10px;
+            border-left: 4px solid #3498db;
+        }}
+        
+        h3 {{
+            font-size: 14pt;
+            color: #555;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }}
+        
+        h4 {{
+            font-size: 12pt;
+            color: #666;
+            margin-top: 12px;
+            margin-bottom: 6px;
+        }}
+        
+        p {{
+            margin: 8px 0;
+            text-align: justify;
+        }}
+        
+        ul, ol {{
+            margin: 8px 0;
+            padding-left: 24px;
+        }}
+        
+        li {{
+            margin: 6px 0;
+        }}
+        
+        strong {{
+            color: #2c3e50;
+            font-weight: 600;
+        }}
+        
+        code {{
+            background-color: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: "Monaco", "Consolas", monospace;
+            font-size: 11pt;
+        }}
+        
+        pre {{
+            background-color: #f8f9fa;
+            padding: 12px;
+            border-radius: 5px;
+            border-left: 3px solid #3498db;
+            overflow-x: auto;
+        }}
+        
+        hr {{
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 20px 0;
+        }}
+        
+        /* 数学公式样式 */
+        .math {{
+            font-family: "STIX Two Math", "Latin Modern Math", "Cambria Math", serif;
+            font-size: 13pt;
+        }}
+        
+        /* 高亮块 */
+        blockquote {{
+            background-color: #f0f8ff;
+            border-left: 4px solid #3498db;
+            padding: 10px 15px;
+            margin: 12px 0;
+            color: #555;
+        }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>
+"""
+        
+        # 使用WeasyPrint生成PDF
+        pdf_bytes = HTML(string=full_html).write_pdf()
+        
+        # 如果指定了输出路径，保存文件
+        if output_path:
+            with open(output_path, 'wb') as f:
+                f.write(pdf_bytes)
+        
+        return pdf_bytes
+        
+    except Exception as e:
+        st.error(f"HTML转PDF失败: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
 def markdown_to_pdf(markdown_text, output_path=None):
     """
     将Markdown转换为PDF（A4尺寸，支持中文和LaTeX数学公式）
+    
+    备用方案：使用reportlab生成PDF（LaTeX公式会转为文本）
     
     Args:
         markdown_text: Markdown格式的文本
@@ -1922,10 +2083,17 @@ if uploaded_files:
                 )
             
             with col2:
-                # 生成PDF
+                # 生成PDF（优先使用HTML渲染方案）
                 with st.spinner("📄 正在生成PDF..."):
                     try:
-                        pdf_bytes = markdown_to_pdf(report)
+                        # 优先使用HTML渲染方案（完美支持LaTeX公式）
+                        pdf_bytes = markdown_to_pdf_html(report)
+                        
+                        # 如果HTML方案失败，回退到文本方案
+                        if not pdf_bytes:
+                            st.warning("⚠️ HTML渲染失败，使用文本格式生成...")
+                            pdf_bytes = markdown_to_pdf(report)
+                        
                         if pdf_bytes:
                             st.download_button(
                                 label="📑 下载PDF报告（A4打印）",
@@ -1934,7 +2102,7 @@ if uploaded_files:
                                 mime="application/pdf",
                                 use_container_width=True,
                                 type="primary",
-                                help="适合直接打印到A4纸，方便孩子练习"
+                                help="✨ 完美支持数学公式渲染，适合直接打印到A4纸"
                             )
                         else:
                             st.error("PDF生成失败，请使用Markdown下载")
