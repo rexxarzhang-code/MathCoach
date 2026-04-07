@@ -16,8 +16,8 @@ import json
 import urllib.parse
 
 # 版本信息
-APP_VERSION = "v1.2.0"
-APP_BUILD_DATE = "2026-03-09"
+APP_VERSION = "v1.2.1"
+APP_BUILD_DATE = "2026-04-07"
 
 # 加载环境变量
 load_dotenv()
@@ -1464,9 +1464,6 @@ if 'reload_image' in st.session_state:
     reload_img_data = st.session_state['reload_image']
     image = Image.open(BytesIO(reload_img_data))
     
-    # 清除reload标记
-    del st.session_state['reload_image']
-    
     # 执行去重检查
     if cos_client and 'duplicate_check_done' not in st.session_state:
         with st.spinner("🔍 正在加载历史分析..."):
@@ -1479,8 +1476,20 @@ if 'reload_image' in st.session_state:
     if st.session_state.get('duplicate_check', {}).get('is_duplicate', False):
         dup_info = st.session_state['duplicate_check']
         
+        # ⚠️ 不要清除reload_image,因为checkbox点击会触发rerun
+        
+        # ⚠️ 不要清除reload_image,因为checkbox点击会触发rerun
+        
         # 格式化时间
         friendly_time = format_friendly_time(dup_info['upload_time'])
+        
+        # 添加返回按钮
+        if st.button("⬅️ 返回主页", key="back_from_reload"):
+            # 清除所有reload相关状态
+            st.session_state.pop('reload_image', None)
+            st.session_state.pop('duplicate_check', None)
+            st.session_state.pop('duplicate_check_done', None)
+            st.rerun()
         
         st.info(f"📥 已加载 **{friendly_time}** 的分析结果")
         
@@ -1516,6 +1525,18 @@ if 'reload_image' in st.session_state:
         # 提供下载按钮
         st.markdown("### 📥 导出报告")
         
+        # 🔍 调试信息按钮
+        if st.checkbox("🔍 显示调试信息", key="debug_history_reload"):
+            with st.expander("调试数据", expanded=True):
+                st.json({
+                    'timestamp': record.get('timestamp', '未记录'),
+                    'has_knowledge_points': 'knowledge_points' in record.get('analysis', {}),
+                    'has_error_diagnosis': 'error_diagnosis' in record.get('analysis', {}),
+                    'has_exercises': 'exercises' in record.get('analysis', {}),
+                    'knowledge_preview': record.get('analysis', {}).get('knowledge_points', '')[:100] + "...",
+                })
+                st.info("📋 如果这里显示的时间是正确的,但StackEdit打印出来的时间不对,说明可能是StackEdit的缓存问题。请使用'📥 下载Markdown'按钮,然后手动导入到StackEdit。")
+        
         # 生成Markdown报告
         markdown_report = f"""# 📊 数学错题分析报告
 
@@ -1542,11 +1563,13 @@ if 'reload_image' in st.session_state:
 *本报告由数学错题分析系统自动生成*
 """
         
-        # 生成StackEdit URL
-        encoded_content = base64.b64encode(markdown_report.encode('utf-8')).decode('utf-8')
+        # 生成StackEdit URL (带时间戳防止缓存)
+        timestamp_tag = f"\n\n---\n*导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n"
+        markdown_with_timestamp = markdown_report + timestamp_tag
+        encoded_content = base64.b64encode(markdown_with_timestamp.encode('utf-8')).decode('utf-8')
         stackedit_url = f"https://stackedit.io/app#providerId=base64&content={urllib.parse.quote(encoded_content)}"
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             st.download_button(
@@ -1554,17 +1577,55 @@ if 'reload_image' in st.session_state:
                 data=markdown_report,
                 file_name=f"错题分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
                 mime="text/markdown",
-                use_container_width=True
+                use_container_width=True,
+                help="下载到本地,手动导入StackEdit"
             )
         
         with col2:
+            # 显示内容供复制
+            if st.button("📋 显示内容", use_container_width=True, help="点击后在下方显示完整内容,可直接复制"):
+                st.session_state['show_markdown_content'] = True
+        
+        with col3:
             st.link_button(
-                label="🖨️ StackEdit打印",
+                label="🖨️ StackEdit",
                 url=stackedit_url,
                 use_container_width=True,
-                type="primary",
-                help="📱 手机端推荐! 一键在StackEdit中打开,完美支持数学公式打印"
+                type="secondary",
+                help="⚠️ 可能缓存旧内容,建议用'下载'方式"
             )
+        
+        # 如果点击了显示内容
+        if st.session_state.get('show_markdown_content', False):
+            st.divider()
+            st.markdown("### 📄 完整内容(可全选复制)")
+            st.code(markdown_report, language="markdown")
+            st.success("✅ 请按 Ctrl+A (Mac: Cmd+A) 全选,然后 Ctrl+C 复制,粘贴到 StackEdit 或其他编辑器")
+            if st.button("❌ 关闭内容显示"):
+                st.session_state['show_markdown_content'] = False
+                st.rerun()
+        
+        # 添加使用说明
+        with st.expander("📖 如何正确打印? (避免缓存)", expanded=False):
+            st.markdown("""
+            ### ✅ 推荐方法: 下载后导入
+            1. 点击 **"📥 下载Markdown"** 
+            2. 访问 https://stackedit.io/app
+            3. 点击左上角菜单 **☰** → **Import from disk**
+            4. 选择刚下载的.md文件
+            5. 点击右上角 **🖨️ 打印图标**
+            
+            ### 📋 或者: 显示+复制
+            1. 点击 **"📋 显示内容"**
+            2. 全选复制内容 (Ctrl+A → Ctrl+C)
+            3. 打开 StackEdit,新建文档
+            4. 粘贴 (Ctrl+V)
+            5. 打印
+            
+            ### ⚠️ 不推荐: 直接点"StackEdit"按钮
+            - 浏览器可能缓存旧内容
+            - 看到的可能不是最新版本
+            """)
 
         
         st.stop()
