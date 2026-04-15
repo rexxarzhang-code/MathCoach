@@ -1,5 +1,4 @@
 import streamlit as st
-import google.generativeai as genai
 from openai import OpenAI
 from PIL import Image
 import os
@@ -16,14 +15,13 @@ import json
 import urllib.parse
 
 # 版本信息
-APP_VERSION = "v1.2.2"
+APP_VERSION = "v1.2.3"
 APP_BUILD_DATE = "2026-04-15"
 
 # 加载环境变量
 load_dotenv()
 
 # 配置API Keys
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 QWEN_API_KEY = os.getenv('QWEN_API_KEY')
 
 # 配置腾讯云 COS
@@ -159,11 +157,6 @@ def stream_qwen_response(response_stream):
     for chunk in response_stream:
         if chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
-
-def stream_gemini_response(response_stream):
-    """处理Gemini流式响应"""
-    for chunk in response_stream:
-        yield chunk.text
 
 def get_model():
     """获取可用的模型 - 保留用于兼容"""
@@ -349,32 +342,9 @@ def diagnose_error(images, knowledge_analysis="", stream=False):
         if "quota" in error_str or "429" in error_str:
             return "⚠️ **API配额已用完** - 请稍后重试或升级计划"
         
-        # 内容审核错误 - 尝试切换模型或简化prompt
+        # 内容审核错误
         elif "datainspectionfailed" in error_str or "inappropriate content" in error_str:
-            # 如果是千问失败，尝试切换到 Gemini
-            if selected_model in ['qwen', 'qwen-max'] and GEMINI_API_KEY:
-                try:
-                    # 简化 prompt，移除可能触发审核的内容
-                    simplified_prompt = f"""
-请分析这道数学错题：
-
-1. **学生解题思路**: 学生是怎么思考的?
-2. **出错步骤**: 在哪一步出错了?
-3. **错误类型**: 概念理解/计算失误/审题不清/方法不当
-4. **改进建议**: 如何避免类似错误?
-
-请使用温和、鼓励的语气，用markdown格式输出。
-"""
-                    result = call_vision_model(simplified_prompt, images, 'gemini', stream=stream)
-                    # 添加提示说明使用了备用模型
-                    if stream:
-                        return result
-                    else:
-                        return f"⚠️ *（原模型内容审核失败，已自动切换到备用模型）*\n\n{result}"
-                except Exception as backup_error:
-                    return f"⚠️ **内容审核失败**\n\n千问模型触发内容审核，切换Gemini也失败。\n\n建议：\n1. 检查错题图片是否包含敏感内容\n2. 稍后重试\n3. 联系管理员\n\n错误: {str(backup_error)[:200]}"
-            else:
-                return f"⚠️ **内容审核失败**\n\nAI模型的安全审核机制被触发，可能原因：\n1. 图片内容被误判\n2. 生成的分析触发了敏感词检测\n\n建议：\n1. 尝试重新上传清晰的错题图片\n2. 稍后重试\n3. 如持续失败，请联系管理员\n\n错误详情: {str(e)[:200]}"
+            return f"⚠️ **内容审核失败**\n\nAI模型的安全审核机制被触发，可能原因：\n1. 图片内容被误判\n2. 生成的分析触发了敏感词检测\n\n建议：\n1. 尝试重新上传清晰的错题图片\n2. 稍后重试\n3. 如持续失败，请联系管理员\n\n错误详情: {str(e)[:200]}"
         
         # 其他错误
         else:
@@ -1267,11 +1237,9 @@ st.set_page_config(page_title="数学错题AI教练", page_icon="📐", layout="
 
 # 初始化session state
 if 'selected_model' not in st.session_state:
-    # 优先使用千问
+    # 优先使用最新的 Qwen3.6-Plus
     if QWEN_API_KEY:
-        st.session_state['selected_model'] = 'qwen'
-    elif GEMINI_API_KEY:
-        st.session_state['selected_model'] = 'gemini'
+        st.session_state['selected_model'] = 'qwen-3.6-plus'
     else:
         st.session_state['selected_model'] = None
 
@@ -1322,7 +1290,7 @@ if st.session_state.get('selected_model'):
     model_info = AVAILABLE_MODELS[st.session_state['selected_model']]
     st.info(f"🤖 当前模型: **{model_info['name']}** (`{model_info['model_id']}`)")
 else:
-    st.error("❌ 未配置任何API Key,请在 .env 文件中配置 QWEN_API_KEY 或 GEMINI_API_KEY")
+    st.error("❌ 未配置API Key,请在 .env 文件中配置 QWEN_API_KEY")
 
 # 继续侧边栏其他配置
 with st.sidebar:
@@ -1393,16 +1361,6 @@ with st.sidebar:
     4. 下载完整报告
     
     💡 **提示**: 上传草稿纸可以帮助AI更准确地定位出错步骤!
-    """)
-    
-    st.divider()
-    st.markdown("### ⚠️ 配额提示")
-    st.warning("""
-    **Gemini免费版限制**:
-    - 每天约1500次请求
-    - 每次分析需3次请求
-    - 如遇配额错误,请明天再试
-    - 或访问 [Google AI Studio](https://ai.google.dev/) 升级
     """)
     
     # 版本号显示（调试用）
@@ -1886,15 +1844,10 @@ if uploaded_files:
                     text_area.markdown(knowledge_text, unsafe_allow_html=True)
                 else:
                     # 流式处理
-                    if selected_model == 'qwen' or selected_model == 'qwen-max':
-                        for chunk in stream_qwen_response(response_stream):
-                            knowledge_text += chunk
-                            # 使用code显示避免LaTeX渲染问题,最后才完整渲染
-                            text_area.text(knowledge_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            knowledge_text += chunk
-                            text_area.text(knowledge_text)
+                    for chunk in stream_qwen_response(response_stream):
+                        knowledge_text += chunk
+                        # 使用code显示避免LaTeX渲染问题,最后才完整渲染
+                        text_area.text(knowledge_text)
                     
                     # 流式完成后,完整渲染markdown(包含LaTeX)
                     text_area.markdown(knowledge_text, unsafe_allow_html=True)
@@ -1923,14 +1876,9 @@ if uploaded_files:
                     text_area.markdown(error_text, unsafe_allow_html=True)
                 else:
                     # 流式处理
-                    if selected_model == 'qwen' or selected_model == 'qwen-max':
-                        for chunk in stream_qwen_response(response_stream):
-                            error_text += chunk
-                            text_area.text(error_text)
-                    else:  # gemini
-                        for chunk in stream_gemini_response(response_stream):
-                            error_text += chunk
-                            text_area.text(error_text)
+                    for chunk in stream_qwen_response(response_stream):
+                        error_text += chunk
+                        text_area.text(error_text)
                     
                     # 流式完成后,完整渲染markdown(包含LaTeX)
                     text_area.markdown(error_text, unsafe_allow_html=True)
@@ -1964,14 +1912,9 @@ if uploaded_files:
                         text_area.markdown(exercise_text, unsafe_allow_html=True)
                     else:
                         # 流式处理
-                        if selected_model == 'qwen' or selected_model == 'qwen-max':
-                            for chunk in stream_qwen_response(response_stream):
-                                exercise_text += chunk
-                                text_area.text(exercise_text)
-                        else:  # gemini
-                            for chunk in stream_gemini_response(response_stream):
-                                exercise_text += chunk
-                                text_area.text(exercise_text)
+                        for chunk in stream_qwen_response(response_stream):
+                            exercise_text += chunk
+                            text_area.text(exercise_text)
                         
                         # 流式完成后,完整渲染markdown(包含LaTeX)
                         text_area.markdown(exercise_text, unsafe_allow_html=True)

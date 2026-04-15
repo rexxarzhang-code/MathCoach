@@ -1,5 +1,26 @@
 # 更新日志
 
+## v1.2.3 (2026-04-15)
+
+### 🐛 Bug修复
+- **彻底修复 'ChatCompletionChunk' object has no attribute 'text' 错误**
+  - 根因: 代码中残留多处 Gemini 条件判断逻辑，新模型 qwen-3.6-plus 不在旧条件列表中，导致流式响应走到 Gemini 分支
+  - 修复: 删除所有 Gemini 流式处理分支，统一使用 `stream_qwen_response()`
+  - 修复: 删除错误处理中的 Gemini 降级逻辑
+  - 修复: 移除未使用的 `stream_gemini_response` 函数
+
+### 🧹 代码清理
+- 移除 `import google.generativeai as genai` 导入
+- 移除 `GEMINI_API_KEY` 环境变量读取
+- 更新错误提示，不再提及 GEMINI_API_KEY
+- 代码完全解耦 Gemini 依赖，项目更简洁
+
+### ⚙️ 配置更新
+- 默认学期改为"下学期"（配合初二下学期学习进度）
+- 默认 AI 模型改为 qwen-3.6-plus
+
+---
+
 ## v1.2.2 (2026-04-15)
 
 ### ✨ 模型升级
