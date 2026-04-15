@@ -16,8 +16,8 @@ import json
 import urllib.parse
 
 # 版本信息
-APP_VERSION = "v1.2.1"
-APP_BUILD_DATE = "2026-04-07"
+APP_VERSION = "v1.2.2"
+APP_BUILD_DATE = "2026-04-15"
 
 # 加载环境变量
 load_dotenv()
@@ -45,9 +45,6 @@ if all([TENCENT_SECRET_ID, TENCENT_SECRET_KEY, TENCENT_COS_REGION, TENCENT_COS_B
         cos_client = CosS3Client(cos_config)
     except Exception as e:
         st.warning(f"COS 初始化失败: {str(e)}")
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 if QWEN_API_KEY:
     qwen_client = OpenAI(
@@ -81,19 +78,14 @@ config = load_config()
 # 模型配置
 AVAILABLE_MODELS = {
     'qwen': {
-        'name': '通义千问 Qwen3.5-Plus (最新最强)',
+        'name': '通义千问 Qwen3.5-Plus (推荐)',
         'model_id': 'qwen3.5-plus-2026-02-15',
         'available': QWEN_API_KEY is not None
     },
-    'qwen-max': {
-        'name': '通义千问 Qwen3-Max (旗舰)',
-        'model_id': 'qwen3-max',
+    'qwen-3.6-plus': {
+        'name': '通义千问 Qwen3.6-Plus (最新)',
+        'model_id': 'qwen3.6-plus',
         'available': QWEN_API_KEY is not None
-    },
-    'gemini': {
-        'name': 'Google Gemini Flash',
-        'model_id': 'gemini-flash-latest',
-        'available': GEMINI_API_KEY is not None
     }
 }
 
@@ -146,34 +138,6 @@ def call_qwen_vision(prompt, images, stream=False, model_id='qwen3.5-plus-2026-0
     except Exception as e:
         raise Exception(f"千问API调用失败: {str(e)}")
 
-def call_gemini_vision(prompt, images, stream=False):
-    """调用Gemini视觉模型（支持多图）
-    
-    Args:
-        prompt: 提示词
-        images: 单个PIL图片或图片列表
-        stream: 是否流式输出
-    """
-    try:
-        # 确保images是列表
-        if not isinstance(images, list):
-            images = [images]
-        
-        # Gemini最多支持16张图
-        if len(images) > 16:
-            raise Exception("Gemini模型最多支持16张图片")
-        
-        model = genai.GenerativeModel('gemini-flash-latest')
-        # Gemini的generate_content接受[prompt, img1, img2, ...]格式
-        content = [prompt] + images
-        response = model.generate_content(content, stream=stream)
-        if stream:
-            return response  # 返回流式生成器
-        else:
-            return response.text
-    except Exception as e:
-        raise Exception(f"Gemini API调用失败: {str(e)}")
-
 def call_vision_model(prompt, images, model_type='qwen', stream=False):
     """统一的视觉模型调用接口（支持多图）
     
@@ -183,22 +147,10 @@ def call_vision_model(prompt, images, model_type='qwen', stream=False):
         model_type: 模型类型
         stream: 是否流式输出
     """
-    if model_type in ['qwen', 'qwen-max'] and qwen_client:
-        try:
-            # 获取对应的model_id
-            model_id = AVAILABLE_MODELS[model_type]['model_id']
-            return call_qwen_vision(prompt, images, stream=stream, model_id=model_id)
-        except Exception as qwen_error:
-            # 如果是配额错误且Gemini可用,自动降级
-            error_msg = str(qwen_error).lower()
-            if ('403' in error_msg or 'quota' in error_msg or 'free tier' in error_msg) and GEMINI_API_KEY:
-                import streamlit as st
-                st.warning("⚠️ 千问配额不足,已自动切换到Gemini模型")
-                return call_gemini_vision(prompt, images, stream=stream)
-            else:
-                raise qwen_error
-    elif model_type == 'gemini' and GEMINI_API_KEY:
-        return call_gemini_vision(prompt, images, stream=stream)
+    if model_type in ['qwen', 'qwen-3.6-plus'] and qwen_client:
+        # 获取对应的model_id
+        model_id = AVAILABLE_MODELS[model_type]['model_id']
+        return call_qwen_vision(prompt, images, stream=stream, model_id=model_id)
     else:
         raise Exception(f"模型 {model_type} 不可用,请检查API Key配置")
 
