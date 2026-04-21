@@ -15,7 +15,7 @@ import json
 import urllib.parse
 
 # 版本信息
-APP_VERSION = "v1.2.4"
+APP_VERSION = "v1.2.5"
 APP_BUILD_DATE = "2026-04-21"
 
 # 加载环境变量
@@ -581,7 +581,7 @@ def list_history_from_cos(limit=20):
         limit: 返回的最大记录数
     
     Returns:
-        list: 历史记录列表 [{'key': str, 'name': str, 'time': str, 'size': int}]
+        list: 历史记录列表 [{'key': str, 'name': str, 'time': str, 'size': int, 'has_analysis': bool}]
     """
     if not cos_client:
         return []
@@ -597,6 +597,19 @@ def list_history_from_cos(limit=20):
         if 'Contents' not in response:
             return []
         
+        # 获取所有分析记录的文件名列表（用于快速匹配）
+        all_record_keys = []
+        try:
+            record_response = cos_client.list_objects(
+                Bucket=TENCENT_COS_BUCKET,
+                Prefix='records/',
+                MaxKeys=1000
+            )
+            if 'Contents' in record_response:
+                all_record_keys = [item['Key'] for item in record_response['Contents']]
+        except Exception:
+            pass
+        
         # 解析结果
         history = []
         for item in response['Contents']:
@@ -604,13 +617,28 @@ def list_history_from_cos(limit=20):
             try:
                 size = int(item['Size']) if isinstance(item['Size'], str) else item['Size']
             except (ValueError, TypeError):
-                size = 0  # 如果转换失败，默认为0
+                size = 0
+            
+            # 从图片文件名中提取完整 MD5
+            # 图片格式: 20260304_163347_22d1563e_63d63c7592635a34eb3197e59fe9d6ec.jpg
+            # records 格式: 20260304_163742_63d63c7592635a34eb3197e59fe9d6ec.jpg.json
+            img_filename = os.path.basename(item['Key'])
+            parts = img_filename.split('_')
+            full_md5 = None
+            if len(parts) >= 4:
+                # 第4段开始是完整MD5（可能含扩展名）
+                full_md5 = '_'.join(parts[3:])  # e.g. "63d63c7592635a34eb3197e59fe9d6ec.jpg"
+            
+            has_analysis = False
+            if full_md5:
+                has_analysis = any(full_md5 in rk for rk in all_record_keys)
             
             history.append({
                 'key': item['Key'],
-                'name': os.path.basename(item['Key']),
+                'name': img_filename,
                 'time': item['LastModified'],
-                'size': size
+                'size': size,
+                'has_analysis': has_analysis
             })
         
         # 按时间倒序排序
@@ -639,11 +667,11 @@ def download_from_cos(cos_key):
             Bucket=TENCENT_COS_BUCKET,
             Key=cos_key
         )
-        # 修复：使用 get_raw_stream().read() 读取完整内容
-        # 默认的 read() 只读取 1024 字节
         return response['Body'].get_raw_stream().read()
     except Exception as e:
-        st.error(f"下载失败: {str(e)}")
+        err = str(e)
+        if 'NoSuchKey' not in err:
+            st.error(f"下载失败: {err}")
         return None
 
 def delete_from_cos(cos_key):
@@ -666,6 +694,9 @@ def delete_from_cos(cos_key):
         )
         return {'success': True, 'error': None}
     except Exception as e:
+        # 文件本就不存在，视为删除成功
+        if 'NoSuchKey' in str(e):
+            return {'success': True, 'error': None}
         return {'success': False, 'error': str(e)}
 
 def delete_history_record(image_key):
@@ -1410,11 +1441,12 @@ if 'reload_image' in st.session_state:
         friendly_time = format_friendly_time(dup_info['upload_time'])
         
         # 添加返回按钮
-        if st.button("⬅️ 返回主页", key="back_from_reload"):
-            # 清除所有reload相关状态
+        if st.button("⬅️ 返回历史记录", key="back_from_reload"):
+            # 清除所有reload相关状态，返回历史记录列表
             st.session_state.pop('reload_image', None)
             st.session_state.pop('duplicate_check', None)
             st.session_state.pop('duplicate_check_done', None)
+            st.session_state['show_history'] = True
             st.rerun()
         
         st.info(f"📥 已加载 **{friendly_time}** 的分析结果")
@@ -1807,8 +1839,12 @@ if uploaded_files:
         st.session_state.pop('reload_image_object', None)
         st.session_state.pop('image_already_displayed', None)
         
-        # 上传错题图片到 COS
-        if cos_client:
+        # 上传错题图片到 COS（如果是从历史记录重新分析，直接复用原始 key，不重复上传）
+        if st.session_state.get('reload_original_cos_key'):
+            # 复用原始图片 key，不重新上传
+            st.session_state['cos_image_key'] = st.session_state.pop('reload_original_cos_key')
+            st.session_state.pop('reload_original_name', None)
+        elif cos_client:
             with st.spinner("📤 正在保存错题到云端..."):
                 # 将图片转换为字节流
                 img_byte_arr = BytesIO()
@@ -1988,6 +2024,8 @@ if uploaded_files:
                 )
                 if save_result['success']:
                     status_placeholder.success("✅ 分析记录已保存！AI老师会记住这次错题！")
+                    # 清除历史记录缓存，下次进入历史页面会重新加载显示最新状态
+                    st.session_state.pop('history_cache', None)
                 else:
                     status_placeholder.warning(f"⚠️ 记录保存失败: {save_result['error']}")
             except Exception as e:
@@ -2079,17 +2117,38 @@ if st.session_state.get('show_history', False):
     if not cos_client:
         st.warning("⚠️ 未配置 COS 存储，无法查看历史记录")
     else:
-        with st.spinner("📖 加载历史记录..."):
-            history = list_history_from_cos(limit=50)
+        # 刷新按钮（手动清除缓存）
+        if st.button("🔄 刷新列表", help="重新加载历史记录，查看最新状态"):
+            st.session_state.pop('history_cache', None)
+            st.rerun()
+        
+        # 使用缓存避免每次 rerun 都重新请求 COS
+        if 'history_cache' not in st.session_state:
+            with st.spinner("📖 加载历史记录..."):
+                st.session_state['history_cache'] = list_history_from_cos(limit=50)
+        history = st.session_state['history_cache']
         
         if not history:
             st.info("📭 暂无历史记录")
         else:
-            st.success(f"找到 {len(history)} 条历史记录")
+            # 统计有无分析记录的数量
+            analyzed_count = sum(1 for h in history if h.get('has_analysis'))
+            unanalyzed_count = len(history) - analyzed_count
+            
+            col_s1, col_s2, col_s3 = st.columns(3)
+            col_s1.metric("📋 共计", f"{len(history)} 题")
+            col_s2.metric("✅ 已分析", f"{analyzed_count} 题")
+            col_s3.metric("⚠️ 未分析", f"{unanalyzed_count} 题")
+            
+            st.divider()
             
             # 按时间分组显示
             for idx, item in enumerate(history):
-                with st.expander(f"📝 {item['name']} - {item['time']}", expanded=(idx==0)):
+                has_analysis = item.get('has_analysis', False)
+                # expander 标题加状态标识
+                status_icon = "✅" if has_analysis else "⚠️"
+                status_label = "已分析" if has_analysis else "未分析"
+                with st.expander(f"{status_icon} [{status_label}] {item['name']} - {item['time']}", expanded=(idx==0)):
                     col1, col2 = st.columns([3, 1])
                     
                     with col1:
@@ -2098,6 +2157,8 @@ if st.session_state.get('show_history', False):
                         if img_data:
                             img = Image.open(BytesIO(img_data))
                             st.image(img, use_column_width=True)
+                        else:
+                            st.warning("⚠️ 图片文件不存在（可能已损坏），建议删除此记录")
                     
                     with col2:
                         st.markdown(f"**上传时间**: {item['time']}")
@@ -2108,11 +2169,24 @@ if st.session_state.get('show_history', False):
                         except (TypeError, ValueError, ZeroDivisionError):
                             st.markdown(f"**文件大小**: 未知")
                         
-                        if st.button("🔍 查看分析", key=f"reanalyze_{idx}", use_container_width=True):
-                            # 保存图片数据，触发去重检查显示历史分析
-                            st.session_state['reload_image'] = img_data
-                            st.session_state['show_history'] = False
-                            st.rerun()
+                        # 根据是否有分析结果显示不同状态（仅图片存在时才显示）
+                        if img_data is None:
+                            st.error("❌ 图片不存在")
+                        elif has_analysis:
+                            st.success("✅ 已有分析")
+                            if st.button("🔍 查看分析", key=f"reanalyze_{idx}", use_container_width=True):
+                                st.session_state['reload_image'] = img_data
+                                st.session_state['show_history'] = False
+                                st.rerun()
+                        else:
+                            st.warning("⚠️ 未分析")
+                            if st.button("🚀 去分析", key=f"reanalyze_{idx}", use_container_width=True, type="primary"):
+                                st.session_state['reload_image'] = img_data
+                                # 保存原始 cos_key，分析时直接复用，不重复上传
+                                st.session_state['reload_original_cos_key'] = item['key']
+                                st.session_state['reload_original_name'] = item['name']
+                                st.session_state['show_history'] = False
+                                st.rerun()
                         
                         # 删除按钮
                         if st.button("🗑️ 删除", key=f"delete_{idx}", type="secondary", use_container_width=True):
