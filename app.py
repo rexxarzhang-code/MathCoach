@@ -15,8 +15,8 @@ import json
 import urllib.parse
 
 # 版本信息
-APP_VERSION = "v1.2.3"
-APP_BUILD_DATE = "2026-04-15"
+APP_VERSION = "v1.2.4"
+APP_BUILD_DATE = "2026-04-21"
 
 # 加载环境变量
 load_dotenv()
@@ -1233,7 +1233,7 @@ def convert_latex_to_text(text):
 
 
 # Streamlit UI
-st.set_page_config(page_title="数学错题AI教练", page_icon="📐", layout="wide")
+st.set_page_config(page_title="数学错题AI教练", page_icon="📐", layout="centered")
 
 # 初始化session state
 if 'selected_model' not in st.session_state:
@@ -1242,6 +1242,12 @@ if 'selected_model' not in st.session_state:
         st.session_state['selected_model'] = 'qwen-3.6-plus'
     else:
         st.session_state['selected_model'] = None
+
+# 稳定模式默认开启（手机端必需，桌面端可手动关闭）
+if 'stable_mode' not in st.session_state:
+    st.session_state['stable_mode'] = True
+
+is_mobile = False  # 保留变量供后续使用
 
 st.title("📐 数学错题AI教练")
 semester_display = config['student'].get('semester', '未设置')
@@ -1325,6 +1331,16 @@ with st.sidebar:
         value=config['analysis'].get('enable_exercises', True),
         help="AI会推荐1道相似练习题，巩固知识点。关闭可提升分析速度。"
     )
+    
+    # 稳定模式开关（手机端/网络不稳定时使用）
+    stable_mode = st.checkbox(
+        "📱 稳定模式（手机端推荐）",
+        value=st.session_state.get('stable_mode', True),
+        help="关闭流式输出，等待完整结果后一次性显示。手机端或网络不稳定时可解决分析中途超时问题。电脑端如需实时显示可取消勾选。"
+    )
+    st.session_state['stable_mode'] = stable_mode
+    if stable_mode:
+        st.caption("⏳ 稳定模式已开启：等待完整结果后显示，更稳定")
     
     if st.button("💾 保存配置"):
         config['student']['location'] = location
@@ -1826,11 +1842,20 @@ if uploaded_files:
         error_placeholder = st.empty()
         exercise_placeholder = st.empty()
         
-        # 1. 知识点分析 - 流式输出
-        status_placeholder.info("📚 正在分析知识点...")
+        # 检测是否使用稳定模式（非流式，适合手机端）
+        use_stream = not st.session_state.get('stable_mode', False)
+        if not use_stream:
+            st.info("📱 稳定模式：每步分析会稍作等待，请勿关闭页面")
+        
+        # 1. 知识点分析
+        status_placeholder.info("📚 正在分析知识点（可能需要30-60秒）...")
         try:
             selected_model = st.session_state.get('selected_model', 'qwen')
-            response_stream = analyze_knowledge_points(all_images, stream=True)
+            if use_stream:
+                response_stream = analyze_knowledge_points(all_images, stream=True)
+            else:
+                with st.spinner("📚 知识点分析中，请稍候..."):
+                    response_stream = analyze_knowledge_points(all_images, stream=False)
             
             knowledge_text = ""
             with knowledge_placeholder.container():
@@ -1858,11 +1883,15 @@ if uploaded_files:
             knowledge_placeholder.error(f"❌ 知识点分析失败: {str(e)[:200]}")
             st.session_state['knowledge_analysis'] = f"分析失败: {str(e)}"
         
-        # 2. 错因诊断 - 流式输出（带历史记忆）
+        # 2. 错因诊断（带历史记忆）
         status_placeholder.info("🔍 正在诊断错误原因（检索历史记录...）")
         try:
             # 传入知识点分析结果，用于搜索相似历史错题
-            response_stream = diagnose_error(all_images, knowledge_analysis=st.session_state['knowledge_analysis'], stream=True)
+            if use_stream:
+                response_stream = diagnose_error(all_images, knowledge_analysis=st.session_state['knowledge_analysis'], stream=True)
+            else:
+                with st.spinner("🔍 错因诊断中，请稍候..."):
+                    response_stream = diagnose_error(all_images, knowledge_analysis=st.session_state['knowledge_analysis'], stream=False)
             
             error_text = ""
             with error_placeholder.container():
@@ -1889,16 +1918,25 @@ if uploaded_files:
             error_placeholder.error(f"❌ 错因诊断失败: {str(e)[:200]}")
             st.session_state['error_diagnosis'] = f"诊断失败: {str(e)}"
         
-        # 3. 练习题生成 - 流式输出（可选，根据用户设置）
+        # 3. 练习题生成（可选，根据用户设置）
         if enable_exercises:
             status_placeholder.info("💪 正在生成延展练习...")
             try:
-                response_stream = generate_similar_exercises(
-                    all_images, 
-                    st.session_state['knowledge_analysis'], 
-                    exercise_count=1,  # 固定生成1题，提升效率
-                    stream=True
-                )
+                if use_stream:
+                    response_stream = generate_similar_exercises(
+                        all_images,
+                        st.session_state['knowledge_analysis'],
+                        exercise_count=1,
+                        stream=True
+                    )
+                else:
+                    with st.spinner("💪 延展练习生成中，请稍候（约30-60秒）..."):
+                        response_stream = generate_similar_exercises(
+                            all_images,
+                            st.session_state['knowledge_analysis'],
+                            exercise_count=1,
+                            stream=False
+                        )
                 
                 exercise_text = ""
                 with exercise_placeholder.container():
